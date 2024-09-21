@@ -1,34 +1,111 @@
 import pathlib
 
 ### Task parameters
-DATA_DIR = '<put your data dir here>'
+DATA_DIR = '/home/lyh/projects/embodied_ai/act/data'
 SIM_TASK_CONFIGS = {
+    'real_tocabi_open':{
+        'dataset_dir': DATA_DIR + '/real_tocabi_open_smoothed_action',
+        # 'dataset_dir': DATA_DIR + '/real_tocabi_open_cropped',
+        'num_episodes': 50,
+        'episode_len': 600,
+        'camera_names': ['left'],
+        'model_dof': 14
+    },
+
+    'real_tocabi_pick_cup':{
+        'dataset_dir': DATA_DIR + '/real_tocabi_pick_cup_cropped',
+        'num_episodes': 50,
+        'episode_len': 600,
+        'camera_names': ['left'],
+        'model_dof': 14
+    },
+
+    'real_tocabi_insert':{
+        'dataset_dir': DATA_DIR + '/real_tocabi_insert_cropped',
+        'num_episodes': 50,
+        'episode_len': 450,
+        'camera_names': ['left'],
+        'model_dof': 14
+    },
+
+    'real_tocabi_pick':{
+        'dataset_dir': DATA_DIR + '/real_tocabi_pick',
+        'num_episodes': 60,
+        'episode_len': 450,
+        'camera_names': ['left'],
+        'model_dof': 13
+    },
+
+    'real_tocabi_pickup':{
+        'dataset_dir': DATA_DIR + '/real_tocabi_pickup',
+        'num_episodes': 36,
+        'episode_len': 600,
+        'camera_names': ['left', 'right'],
+        'model_dof': 14
+    },
+
+    'real_tocabi_place':{
+        'dataset_dir': DATA_DIR + '/real_tocabi_place',
+        'num_episodes': 12,
+        'episode_len': 900,
+        'camera_names': ['left', 'right'],
+        'model_dof': 14
+    },
+
+    'real_tocabi_approach_tabletop':{
+        'dataset_dir': DATA_DIR + '/real_tocabi_approach_tabletop',
+        'num_episodes': 22,
+        'episode_len': 450,
+        'camera_names': ['head'],
+        'model_dof': 11
+    },
+
+    'sim_tocabi_approach_mustard':{
+        'dataset_dir': DATA_DIR + '/sim_tocabi_approach_mustard',
+        'num_episodes': 20,
+        'episode_len': 223,
+        'camera_names': ['top'],
+        'model_dof': 8
+    },
+
+    'sim_tocabi_approach_tabletop':{
+        'dataset_dir': DATA_DIR + '/sim_tocabi_approach_tabletop',
+        'num_episodes': 45,
+        'episode_len': 250,
+        'camera_names': ['top'],
+        'model_dof': 8
+    },
+
     'sim_transfer_cube_scripted':{
         'dataset_dir': DATA_DIR + '/sim_transfer_cube_scripted',
         'num_episodes': 50,
         'episode_len': 400,
-        'camera_names': ['top']
+        'camera_names': ['top'],
+        'model_dof': 14
     },
 
     'sim_transfer_cube_human':{
         'dataset_dir': DATA_DIR + '/sim_transfer_cube_human',
         'num_episodes': 50,
         'episode_len': 400,
-        'camera_names': ['top']
+        'camera_names': ['top'],
+        'model_dof': 14
     },
 
     'sim_insertion_scripted': {
         'dataset_dir': DATA_DIR + '/sim_insertion_scripted',
         'num_episodes': 50,
         'episode_len': 400,
-        'camera_names': ['top']
+        'camera_names': ['top'],
+        'model_dof': 14
     },
 
     'sim_insertion_human': {
         'dataset_dir': DATA_DIR + '/sim_insertion_human',
         'num_episodes': 50,
         'episode_len': 500,
-        'camera_names': ['top']
+        'camera_names': ['top'],
+        'model_dof': 14
     },
 }
 
