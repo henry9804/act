@@ -1,25 +1,25 @@
-import os, sys
+import os
 import argparse
 import numpy as np
-import cv2
 import time
 from matplotlib import pyplot as plt
-
+# ACT
 import pickle
 import torch
 import torch.multiprocessing as mp
 from einops import rearrange
 from policy import ACTPolicy
 from constants import SIM_TASK_CONFIGS
-
+# ROS
 import rospy
 from moveit_msgs.msg import DisplayRobotState
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Int32
 from tocabi_msgs.msg._positionCommand import positionCommand
-
+# TCP image
 import socket
 import struct
+import cv2
 
 
 joint_name = ["L_HipYaw_Joint", "L_HipRoll_Joint", "L_HipPitch_Joint",
@@ -44,36 +44,20 @@ hand_joint_name  = ["aa1" , "aa2" , "aa3" , "aa4" ,
                     "dip1", "dip2", "dip3", "dip4",
                     "mcp1", "mcp2", "mcp3", "mcp4",
                     "pip1", "pip2", "pip3", "pip4"]
-hand_open_state  = np.array([0.0   , 0.0   , 0.0   , 0.0   ,
-                             0.0550, 0.0550, 0.0550, 0.0550,
-                             0.1517, 0.1517, 0.1517, 0.1517,
-                             0.0687, 0.0687, 0.0687, 0.0687,
-                             0.0088, 0.0088, 0.0088, 0.0088])
-hand_close_state = np.array([0.6   , 0.0   , 0.0   , 0.0   ,
-                             0.6645, 0.6645, 0.6645, 0.6645,
-                             0.8379, 0.8379, 0.8379, 0.8379,
-                             0.8306, 0.8306, 0.8306, 0.8306,
-                             0.9573, 0.9573, 0.9573, 0.9573])
+hand_open_state = np.array([0.0   , 0.0   , 0.0   , 0.0   ,
+                            0.0550, 0.0550, 0.0550, 0.0550,
+                            0.1517, 0.1517, 0.1517, 0.1517,
+                            0.0687, 0.0687, 0.0687, 0.0687,
+                            0.0088, 0.0088, 0.0088, 0.0088])
+hand_close_state= np.array([0.6   , 0.0   , 0.0   , 0.0   ,
+                            0.6645, 0.6645, 0.6645, 0.6645,
+                            0.8379, 0.8379, 0.8379, 0.8379,
+                            0.8306, 0.8306, 0.8306, 0.8306,
+                            0.9573, 0.9573, 0.9573, 0.9573])
 
 joint_index = [12, 13, 14, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
-FPS = 10
+FPS = 30
 log_dir = '/home/dyros/act/log'
-
-def im_msg_2_cv_img(img_msg, dir=None):
-    stamp = img_msg.header.stamp
-    filename = f'{img_msg.header.seq}_{stamp.secs}_{stamp.nsecs:09}.{img_msg.format}'
-
-    image_array = np.frombuffer(img_msg.data, np.uint8)
-    image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-    if dir != None:
-        cv2.imwrite(os.path.join(dir, filename), image)
-    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    
-    # return rgb_image
-    cropped_image = rgb_image[:,160:1760]
-    resized_image = cv2.resize(cropped_image, (640,480), interpolation=cv2.INTER_AREA)
-
-    return resized_image
 
 def receive_image(sock):
     # Receive the size of the image
@@ -159,17 +143,17 @@ class TocabiAct:
 
         self.q_current = np.zeros(33)
         self.q_init = np.zeros(33)
-        self.hand_state = 0.0
+        self.hand_state = 0.0   # change this value appropriately ex. pick->0.0 place->1.0
 
         self.images = {}
         for cam_name in self.camera_names:
-            self.images[cam_name] = torch.zeros([3, 480, 640])
+            self.images[cam_name] = torch.zeros([480, 640, 3])
             self.images[cam_name].share_memory_()
         
         self.position_command_pub = rospy.Publisher("/tocabi/positioncommand", positionCommand, queue_size=1)
-        self.hand_open_pub = rospy.Publisher('/tocabi_hand/on', Bool, queue_size=10)
-        self.current_state_pub = rospy.Publisher('/current_state', DisplayRobotState, queue_size=10)
-        self.goal_state_pub = rospy.Publisher('/goal_state', DisplayRobotState, queue_size=10)
+        self.hand_open_pub = rospy.Publisher('/tocabi_hand/on', Bool, queue_size=1)
+        self.current_state_pub = rospy.Publisher('/current_state', DisplayRobotState, queue_size=1)
+        self.goal_state_pub = rospy.Publisher('/goal_state', DisplayRobotState, queue_size=1)
 
     def to_ready_pose(self):
         pc_msg = positionCommand()
@@ -186,7 +170,7 @@ class TocabiAct:
         current_state.state.joint_state.header.stamp = rospy.Time.now()
         current_state.state.joint_state.name = [*joint_name, *hand_joint_name]
         if self.hand_state < 0.5:
-            current_state.state.joint_state.position = [*self.q_current, *hand_open_state]
+            current_state.state.joint_state.position = np.concatenate([self.q_current, hand_open_state])
         else:
             current_state.state.joint_state.position = np.concatenate([self.q_current, hand_close_state])
         self.current_state_pub.publish(current_state)
@@ -201,7 +185,7 @@ class TocabiAct:
                 self.q_init = self.q_current.copy()
                 self.start = True
             else:
-                print('[WARNING] ACT inference is in progress!')
+                print('[WARNING] ACT inference is already in progress!')
         elif msg.data == 2:
             if self.start:
                 print('end!')
@@ -209,34 +193,37 @@ class TocabiAct:
                 log = self.all_time_actions.clone().detach()
                 np.save(os.path.join(log_dir, time.strftime('%Y%m%d_%H%M%S.npy', time.localtime())), log.cpu().numpy())
             else:
-                print('[WARNING] ACT inference already terminated!')
+                print('[WARNING] ACT inference has been already terminated!')
         else:
-            print('[WARNING] wrong mode input!\n\
-                             0: move to reay pose\n\
-                             1: start ACT inferencing\n\
-                             2: end ACT inferencing')
+            print('[WARNING] wrong mode input!\n',
+                  '          0: move to reay pose\n'
+                  '          1: start ACT inferencing\n'
+                  '          2: end ACT inferencing')
 
     def inference(self):
         with torch.inference_mode():
-            start_ = time.time()
+            start = time.time()
 
-            # qpos_numpy = np.array([self.q_current[idx] for idx in joint_index])
             qpos = [self.q_current[idx] for idx in joint_index]
             qpos.append(self.hand_state)
             qpos_numpy = np.array(qpos)
-            # curr_image = np.stack([self.images[cam_name] for cam_name in self.camera_names], axis=0)
-
             qpos = self.pre_process(qpos_numpy)
             qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
-            # curr_image = torch.from_numpy(curr_image / 255.0).float().cuda().unsqueeze(0)
-            curr_image = torch.stack([self.images[cam_name] for cam_name in self.camera_names], axis=0)
-            curr_image = curr_image.float().cuda().unsqueeze(0)
+            
+            curr_image = torch.stack([rearrange(self.images[cam_name], 'h w c -> c h w') for cam_name in self.camera_names], axis=0)
+            curr_image = curr_image.cuda().unsqueeze(0)
 
             ### query policy
             if self.t % self.query_frequency == 0:
                 self.all_actions = self.policy(qpos, curr_image)
+            inference_time = time.time() - start
+            if self.t == 0:
+                next_step = 0
+            else:
+                next_step = int(inference_time * FPS)
             if self.temporal_agg:
                 self.all_time_actions[[self.t], self.t:self.t+self.num_queries] = self.all_actions
+                self.t += next_step
                 actions_for_curr_step = self.all_time_actions[:, self.t]
                 actions_populated = torch.all(actions_for_curr_step != 0, axis=1)
                 actions_for_curr_step = actions_for_curr_step[actions_populated]
@@ -246,49 +233,21 @@ class TocabiAct:
                 exp_weights = torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)
                 raw_action = (actions_for_curr_step * exp_weights).sum(dim=0, keepdim=True)
             else:
+                self.t += next_step
                 raw_action = self.all_actions[:, self.t % self.query_frequency]
 
             ### post-process actions
             raw_action = raw_action.squeeze(0).cpu().numpy()
             action = self.post_process(raw_action)
-            # target_qpos = action
             target_qpos = action[:-1]
             target_hand = action[-1]
 
-            end_ = time.time()
-
             ### step the environment
             print(self.t, ': ', action)
-
-            # tocabi control
-            pc_msg = positionCommand()
-            pc_msg.position = self.q_init.copy()
-            for j, q in zip(joint_index, target_qpos):
-                if j == 13:
-                    pc_msg.position[j] = min(q, 0.55)
-                else:
-                    pc_msg.position[j] = q
-            pc_msg.traj_time = 1/FPS - max(0, end_ - start_)
-            pc_msg.gravity = True
-            pc_msg.relative = False
-            self.position_command_pub.publish(pc_msg)
-
-            # hand control
-            if self.hand_state < 0.5 and target_hand >= 0.5:
-                # grasp
-                hand_msg = Bool()
-                hand_msg.data = True
-                self.hand_open_pub.publish(hand_msg)
-                self.hand_state = 1.0
-            if self.hand_state >= 0.5 and target_hand < 0.5:
-                # stretch
-                hand_msg = Bool()
-                hand_msg.data = False
-                self.hand_open_pub.publish(hand_msg)
-                self.hand_state = 0.0
+            print('  inference  time: ', inference_time*1000, 'ms')
 
             # visualize last action chunks
-            raw_final_action = self.all_actions[:, 0]
+            raw_final_action = self.all_actions[:, -1]
             final_action = self.post_process(raw_final_action.squeeze(0).cpu().numpy())
             goal_state = DisplayRobotState()
             goal_state.state.joint_state.header.stamp = rospy.Time.now()
@@ -300,9 +259,70 @@ class TocabiAct:
             goal_state.state.joint_state.position[joint_index] = final_action[:-1]
             self.goal_state_pub.publish(goal_state)
 
+            # tocabi control
+            pc_msg = positionCommand()
+            pc_msg.position = self.q_init.copy()
+            for j, q in zip(joint_index, target_qpos):
+                if j == 13: # for tocabi waist safety limit
+                    pc_msg.position[j] = min(q, 0.55)
+                else:
+                    pc_msg.position[j] = q
+            post_processs_time = time.time() - start
+            next_step = int(post_processs_time * FPS)
+            print('post process time: ', (post_processs_time - inference_time)*1000, 'ms')
+            if self.t == 0:
+                pc_msg.traj_time = 1/FPS
+            else:
+                pc_msg.traj_time = (1+next_step)/FPS - post_processs_time
+            pc_msg.gravity = True
+            pc_msg.relative = False
+            self.position_command_pub.publish(pc_msg)
+
+            # hand control
+            if self.hand_state < 0.5 and target_hand >= 0.5:
+                # grasp
+                hand_msg = Bool()
+                hand_msg.data = True
+                self.hand_open_pub.publish(hand_msg)
+                self.hand_state = 1.0
+            elif self.hand_state >= 0.5 and target_hand < 0.5:
+                # stretch
+                hand_msg = Bool()
+                hand_msg.data = False
+                self.hand_open_pub.publish(hand_msg)
+                self.hand_state = 0.0
+
             self.t += 1
 
-def run_server(image, cam_name, stop_event = None):
+            total_time = time.time() - start
+            print('    total    time: ', total_time*1000, 'ms')
+            if self.t == 0:
+                time.sleep(1/FPS)
+            else:
+                time.sleep((1+next_step)/FPS - post_processs_time)
+
+        return total_time
+
+def visualize_img(images, camera_names, stop_event):
+    plt.ion()
+    fig, axs = plt.subplots(1, len(camera_names), squeeze=False)
+    imshow = {}
+    for ax, cam_name in zip(axs[0], camera_names):
+        imshow[cam_name] = ax.imshow(np.zeros([480, 640, 3]))
+        ax.set_title(cam_name)
+        ax.axis('off')
+        
+    while not stop_event.is_set():
+        for cam_name in camera_names:
+            input_image = images[cam_name].numpy()
+            imshow[cam_name].set_data(input_image)
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+        time.sleep(0.01)
+
+    plt.close()
+
+def run_server(image, cam_name, stop_event):
     host = "10.112.1.187"  # change the host to ip address of current device
     cam_name_to_port = {'left':41117,'right':41119}
     port = cam_name_to_port[cam_name]
@@ -333,6 +353,7 @@ def run_server(image, cam_name, stop_event = None):
             
             image_data = receive_image(client_socket)
             if image_data is None:
+                print('no image received')
                 break
             
             # Decode the image
@@ -346,19 +367,16 @@ def run_server(image, cam_name, stop_event = None):
             rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
 
             # save to image instance
-            torch_img = rearrange(rgb_image, 'h w c -> c h w')
-            image[:] =  torch.from_numpy(torch_img)
+            normalized_image = torch.from_numpy(rgb_image / 255.0).float()
+            image[:] = normalized_image
 
-            cv2.imshow(cam_name, resized_image)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
         except Exception as e:
             print(f"Error: {e}")
             break
     
     client_socket.close()
     server_socket.close()
-    print(f'start {cam_name} receiver.')
+    print(f'end {cam_name} receiver.')
 
 def main(args):
     tocabi_act = TocabiAct(vars(args))
@@ -372,6 +390,11 @@ def main(args):
         p.start()
         processes.append(p)
 
+    # uncomment below for visualizing images
+    # p = mp.Process(target=visualize_img, args=(tocabi_act.images, tocabi_act.camera_names, stop_event))
+    # p.start()
+    # processes.append(p)
+
     rospy.init_node('tocabi_act', anonymous=True)
 
     joint_sub = rospy.Subscriber("/tocabi/jointstates", JointState, tocabi_act.joint_callback)
@@ -382,19 +405,13 @@ def main(args):
 
     while not rospy.is_shutdown():
         if tocabi_act.start:
-            start = time.time()
-            tocabi_act.inference()
-            end = time.time()
-            inf_time.append(end-start)
-            if (end-start < 1/FPS):
-                time.sleep(1/FPS - (end - start))
-            else:
-                time.sleep(1/FPS)
-        if tocabi_act.t == tocabi_act.max_timesteps:
-            print('end!')
-            tocabi_act.start = False
-            log = tocabi_act.all_time_actions.clone().detach()
-            np.save(os.path.join(log_dir, time.strftime('%Y%m%d_%H%M%S.npy', time.localtime())), log.cpu().numpy())
+            total_time = tocabi_act.inference()
+            inf_time.append(total_time)
+            if tocabi_act.t == tocabi_act.max_timesteps:
+                print('end!')
+                tocabi_act.start = False
+                log = tocabi_act.all_time_actions.clone().detach()
+                np.save(os.path.join(log_dir, time.strftime('%Y%m%d_%H%M%S.npy', time.localtime())), log.cpu().numpy())
 
     print('gracefully shutdown ...')
     stop_event.set()
@@ -411,7 +428,7 @@ run with following args
 python real_tocabi_act_tcp.py \
 --policy_class ACT --kl_weight 10 --hidden_dim 512 --batch_size 8 \
 --dim_feedforward 3200 --num_epochs 2000  --lr 1e-5 --seed 0 --temporal_agg \
---chunk_size 30 --task_name real_tocabi_open --ckpt_dir /media/dyros/SSD2TB/act/ckpt/open_cropped
+--chunk_size 30 --task_name real_tocabi_open --ckpt_dir /media/dyros/SSD_2TB/act/ckpt/open_cropped
 '''
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
