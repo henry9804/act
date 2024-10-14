@@ -82,7 +82,8 @@ class DETRVAE(nn.Module):
         env_state: None
         actions: batch, seq, action_dim
         """
-        is_training = actions is not None # train or val
+        is_training = actions is not None # train or val    # train with CVAE encoder
+        # is_training = False # train without CVAE encoder
         bs, _ = qpos.shape
         ### Obtain latent z from action sequence
         if is_training:

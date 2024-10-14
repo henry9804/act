@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 from copy import deepcopy
 from tqdm import tqdm
 from einops import rearrange
+import wandb
+import time
 
 from constants import DT
 from constants import PUPPET_GRIPPER_JOINT_OPEN
@@ -85,6 +87,24 @@ def main(args):
         'real_robot': not is_sim
     }
 
+    wandb.login(key = '7afe8f0cb860fa959ee2daf0f8ba40575f703063')
+    wandb.init(
+        project=task_name,
+        config={
+            "dataset": dataset_dir,
+            "camera names": camera_names,
+            "model dof": state_dim,
+            "num episodes": num_episodes,
+            "ckpt dir": ckpt_dir,
+            "chunk size": args['chunk_size'],
+            "batch size": batch_size_train,
+            "epochs": num_epochs,
+            "lr": args['lr'],
+            "seed": args['seed']
+        },
+        name=time.strftime('%Y%m%d_%H%M%S')
+    )
+    
     if is_eval:
         ckpt_names = [f'policy_best.ckpt']
         results = []
@@ -334,7 +354,7 @@ def train_bc(train_dataloader, val_dataloader, config):
     min_val_loss = np.inf
     best_ckpt_info = None
     for epoch in tqdm(range(num_epochs)):
-        print(f'\nEpoch {epoch}')
+        wandb_log = {}
         # validation
         with torch.inference_mode():
             policy.eval()
@@ -349,11 +369,10 @@ def train_bc(train_dataloader, val_dataloader, config):
             if epoch_val_loss < min_val_loss:
                 min_val_loss = epoch_val_loss
                 best_ckpt_info = (epoch, min_val_loss, deepcopy(policy.state_dict()))
-        print(f'Val loss:   {epoch_val_loss:.5f}')
-        summary_string = ''
+        val_summary_string = ''
         for k, v in epoch_summary.items():
-            summary_string += f'{k}: {v.item():.3f} '
-        print(summary_string)
+            val_summary_string += f'{k}: {v.item():.3f} '
+            wandb_log[f'Val {k}'] = v.item()
 
         # training
         policy.train()
@@ -368,16 +387,23 @@ def train_bc(train_dataloader, val_dataloader, config):
             train_history.append(detach_dict(forward_dict))
         epoch_summary = compute_dict_mean(train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)])
         epoch_train_loss = epoch_summary['loss']
-        print(f'Train loss: {epoch_train_loss:.5f}')
-        summary_string = ''
+        train_summary_string = ''
         for k, v in epoch_summary.items():
-            summary_string += f'{k}: {v.item():.3f} '
-        print(summary_string)
+            train_summary_string += f'{k}: {v.item():.3f} '
+            wandb_log[f'Train {k}'] = v.item()
+
+        wandb.log(wandb_log)
 
         if epoch % 100 == 0:
             ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
             torch.save(policy.state_dict(), ckpt_path)
             plot_history(train_history, validation_history, epoch, ckpt_dir, seed)
+
+            print(f'\nEpoch {epoch}')
+            print(f'Val loss:   {epoch_val_loss:.5f}')
+            print(val_summary_string)
+            print(f'Train loss: {epoch_train_loss:.5f}')
+            print(train_summary_string)
 
     ckpt_path = os.path.join(ckpt_dir, f'policy_last.ckpt')
     torch.save(policy.state_dict(), ckpt_path)
@@ -408,12 +434,13 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
         plt.title(key)
         plt.savefig(plot_path)
     print(f'Saved plots to {ckpt_dir}')
+    plt.close()
 
 '''
 python3 imitate_episodes.py \
---task_name real_tocabi_pick --ckpt_dir ckpt/pick_60_episode_2 --policy_class ACT \
---kl_weight 10 --chunk_size 30 --hidden_dim 512 --batch_size 32 \
---dim_feedforward 3200 --num_epochs 10000 --lr 3e-5 --seed 0
+--policy_class ACT --kl_weight 10 --chunk_size 30 --hidden_dim 512 \
+--batch_size 32 --dim_feedforward 3200 --num_epochs 20000 --lr 3e-5 --seed 0 \
+--task_name real_panda_peg_in_hole --ckpt_dir /media/embodied_ai/SSD2TB/act/ckpt/panda/peg_in_hole
 '''
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
