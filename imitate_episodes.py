@@ -35,6 +35,12 @@ def main(args):
     batch_size_train = args['batch_size']
     batch_size_val = args['batch_size']
     num_epochs = args['num_epochs']
+    use_waypoint = args['use_waypoint']
+    constant_waypoint = args['constant_waypoint']
+    if use_waypoint:
+        print('Using waypoint')
+    if constant_waypoint is not None:
+        print(f'Constant waypoint: {constant_waypoint}')
 
     # get task parameters
     is_sim = task_name[:4] == 'sim_'
@@ -117,7 +123,8 @@ def main(args):
         print()
         exit()
 
-    train_dataloader, val_dataloader, stats, _ = load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val)
+    train_dataloader, val_dataloader, stats, _ = load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val,
+        use_waypoint, constant_waypoint)
 
     # save dataset stats
     if not os.path.isdir(ckpt_dir):
@@ -346,6 +353,31 @@ def train_bc(train_dataloader, val_dataloader, config):
     set_seed(seed)
 
     policy = make_policy(policy_class, policy_config)
+    # if ckpt_dir is not empty, prompt the user to load the checkpoint
+    if os.path.isdir(ckpt_dir) and len(os.listdir(ckpt_dir)) > 1:
+        print(f"Checkpoint directory {ckpt_dir} is not empty. Load checkpoint? (y/n)")
+        load_ckpt = input()
+        if load_ckpt == "y":
+            # load the latest checkpoint
+            latest_idx = max(
+                [
+                    int(f.split("_")[2])
+                    for f in os.listdir(ckpt_dir)
+                    if f.startswith("policy_epoch_")
+                ]
+            )
+            ckpt_path = os.path.join(
+                ckpt_dir, f"policy_epoch_{latest_idx}_seed_{seed}.ckpt"
+            )
+            print(f"Loading checkpoint from {ckpt_path}")
+            loading_status = policy.load_state_dict(torch.load(ckpt_path))
+            print(loading_status)
+        else:
+            print("Not loading checkpoint")
+            latest_idx = 0
+    else:
+        latest_idx = 0
+
     policy.cuda()
     optimizer = make_optimizer(policy_class, policy)
 
@@ -353,7 +385,7 @@ def train_bc(train_dataloader, val_dataloader, config):
     validation_history = []
     min_val_loss = np.inf
     best_ckpt_info = None
-    for epoch in tqdm(range(num_epochs)):
+    for epoch in tqdm(range(latest_idx, num_epochs)):
         wandb_log = {}
         # validation
         with torch.inference_mode():
@@ -385,7 +417,8 @@ def train_bc(train_dataloader, val_dataloader, config):
             optimizer.step()
             optimizer.zero_grad()
             train_history.append(detach_dict(forward_dict))
-        epoch_summary = compute_dict_mean(train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)])
+        e = epoch - latest_idx
+        epoch_summary = compute_dict_mean(train_history[(batch_idx+1)*e:(batch_idx+1)*(epoch+1)])
         epoch_train_loss = epoch_summary['loss']
         train_summary_string = ''
         for k, v in epoch_summary.items():
@@ -461,4 +494,8 @@ if __name__ == '__main__':
     parser.add_argument('--dim_feedforward', action='store', type=int, help='dim_feedforward', required=False)
     parser.add_argument('--temporal_agg', action='store_true')
     
+    # for waypoints
+    parser.add_argument('--use_waypoint', action='store_true')
+    parser.add_argument('--constant_waypoint', action='store', type=int, help='constant_waypoint', required=False)
+
     main(vars(parser.parse_args()))

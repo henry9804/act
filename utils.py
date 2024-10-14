@@ -7,14 +7,25 @@ from torch.utils.data import TensorDataset, DataLoader
 import IPython
 e = IPython.embed
 
+def relabel_waypoints(arr, waypoint_indices):
+    start_idx = 0
+    for key_idx in waypoint_indices:
+        # Replace the items between the start index and the key index with the key item
+        arr[start_idx:key_idx] = arr[key_idx]
+        start_idx = key_idx
+    return arr
+
 class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats,
+        use_waypoint=False, constant_waypoint=None):
         super(EpisodicDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
         self.norm_stats = norm_stats
         self.is_sim = None
+        self.use_waypoint = use_waypoint
+        self.constant_waypoint = constant_waypoint
         self.__getitem__(0) # initialize self.is_sim
 
     def __len__(self):
@@ -48,6 +59,29 @@ class EpisodicDataset(torch.utils.data.Dataset):
             # else:
             #     action = root['/action'][max(0, start_ts - 1):] # hack, to make timesteps more aligned
             #     action_len = episode_len - max(0, start_ts - 1) # hack, to make timesteps more aligned
+
+            if self.use_waypoint and self.constant_waypoint is None:
+                waypoints = root['/waypoints'][()]
+
+        if self.use_waypoint:
+            # constant waypoints
+            if self.constant_waypoint is not None:
+                assert self.constant_waypoint > 0
+                waypoints = np.arange(1, action_len, self.constant_waypoint)
+                if len(waypoints) == 0:
+                    waypoints = np.array([action_len - 1])
+                elif waypoints[-1] != action_len - 1:
+                    waypoints = np.append(waypoints, action_len - 1)
+            # auto waypoints
+            else:
+                waypoints = waypoints - start_ts
+                waypoints = waypoints[waypoints >= 0]
+                waypoints = waypoints[waypoints < action_len]
+                waypoints = np.append(waypoints, action_len - 1)
+                waypoints = np.unique(waypoints)
+                waypoints = waypoints.astype(np.int32)
+
+            action = relabel_waypoints(action, waypoints)
 
         self.is_sim = is_sim
         padded_action = np.zeros(original_action_shape, dtype=np.float32)
@@ -110,7 +144,8 @@ def get_norm_stats(dataset_dir, num_episodes):
     return stats
 
 
-def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val):
+def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val,
+    use_waypoint=False, constant_waypoint=None):
     print(f'\nData from: {dataset_dir}\n')
     # obtain train test split
     train_ratio = 0.8
@@ -122,8 +157,10 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     norm_stats = get_norm_stats(dataset_dir, num_episodes)
 
     # construct dataset and dataloader
-    train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats)
-    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats)
+    train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats,
+        use_waypoint=use_waypoint, constant_waypoint=constant_waypoint)
+    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats,
+        use_waypoint=use_waypoint, constant_waypoint=constant_waypoint)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
 
