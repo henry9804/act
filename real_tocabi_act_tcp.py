@@ -6,7 +6,6 @@ from matplotlib import pyplot as plt
 # ACT
 import pickle
 import torch
-import torch.multiprocessing as mp
 from einops import rearrange
 from policy import ACTPolicy
 from constants import SIM_TASK_CONFIGS
@@ -19,6 +18,8 @@ from tocabi_msgs.msg._positionCommand import positionCommand
 # TCP image
 import socket
 import struct
+import multiprocessing as mp
+from multiprocessing import Manager
 import cv2
 
 
@@ -57,7 +58,7 @@ hand_close_state= np.array([0.6   , 0.0   , 0.0   , 0.0   ,
 
 joint_index = [12, 13, 14, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
 FPS = 30
-log_dir = '/home/dyros/act/log'
+log_dir = '/home/dyros/act/logs'
 
 def receive_image(sock):
     # Receive the size of the image
@@ -99,7 +100,7 @@ class TocabiAct:
 
         ckpt_name = 'policy_best.ckpt'
         self.state_dim = task_config['model_dof']
-        self.max_timesteps = int(episode_len * 2)
+        self.max_timesteps = int(episode_len * 10)
 
         policy_config = {'lr': args['lr'],
                         'num_queries': args['chunk_size'],
@@ -145,10 +146,7 @@ class TocabiAct:
         self.q_init = np.zeros(33)
         self.hand_state = 0.0   # change this value appropriately ex. pick->0.0 place->1.0
 
-        self.images = {}
-        for cam_name in self.camera_names:
-            self.images[cam_name] = torch.zeros([480, 640, 3])
-            self.images[cam_name].share_memory_()
+        self.img_buf = None
         
         self.position_command_pub = rospy.Publisher("/tocabi/positioncommand", positionCommand, queue_size=1)
         self.hand_open_pub = rospy.Publisher('/tocabi_hand/on', Bool, queue_size=1)
@@ -210,7 +208,22 @@ class TocabiAct:
             qpos = self.pre_process(qpos_numpy)
             qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
             
-            curr_image = torch.stack([rearrange(self.images[cam_name], 'h w c -> c h w') for cam_name in self.camera_names], axis=0)
+            images = {}
+            for cam_name in self.camera_names:
+                # Decode the image
+                cv_image = cv2.imdecode(np.frombuffer(self.img_buf[cam_name], dtype=np.uint8), cv2.IMREAD_COLOR)
+
+                # process the image
+                if cam_name == 'right':
+                    cv_image = cv2.rotate(cv_image, cv2.ROTATE_180)
+                cropped_image = cv_image[480:,480:1440]
+                resized_image = cv2.resize(cropped_image, (640,480), interpolation=cv2.INTER_AREA)
+                rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
+
+                # save to image instance
+                normalized_image = torch.from_numpy(rgb_image / 255.0).float()
+                images[cam_name] = normalized_image
+            curr_image = torch.stack([rearrange(images[cam_name], 'h w c -> c h w') for cam_name in self.camera_names], axis=0)
             curr_image = curr_image.cuda().unsqueeze(0)
 
             ### query policy
@@ -267,6 +280,8 @@ class TocabiAct:
                     pc_msg.position[j] = min(q, 0.55)
                 else:
                     pc_msg.position[j] = q
+            # rasie left arm as bending waist
+            pc_msg.position[19] -= pc_msg.position[13]
             post_processs_time = time.time() - start
             next_step = int(post_processs_time * FPS)
             print('post process time: ', (post_processs_time - inference_time)*1000, 'ms')
@@ -303,7 +318,7 @@ class TocabiAct:
 
         return total_time
 
-def visualize_img(images, camera_names, stop_event):
+def visualize_img(camera_names, img_buf, stop_event):
     plt.ion()
     fig, axs = plt.subplots(1, len(camera_names), squeeze=False)
     imshow = {}
@@ -314,15 +329,27 @@ def visualize_img(images, camera_names, stop_event):
         
     while not stop_event.is_set():
         for cam_name in camera_names:
-            input_image = images[cam_name].numpy()
-            imshow[cam_name].set_data(input_image)
+            if img_buf[cam_name] is None:
+                continue
+            # Decode the image
+            cv_image = cv2.imdecode(np.frombuffer(img_buf[cam_name], dtype=np.uint8), cv2.IMREAD_COLOR)
+            if cv_image is None:
+                continue
+
+            # process the image
+            if cam_name == 'right':
+                cv_image = cv2.rotate(cv_image, cv2.ROTATE_180)
+            cropped_image = cv_image[480:,480:1440]
+            resized_image = cv2.resize(cropped_image, (640,480), interpolation=cv2.INTER_AREA)
+            rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
+            imshow[cam_name].set_data(rgb_image)
         fig.canvas.draw()
         fig.canvas.flush_events()
         time.sleep(0.01)
 
     plt.close()
 
-def run_server(image, cam_name, stop_event):
+def run_server(cam_name, img_buf, stop_event):
     host = "10.112.1.187"  # change the host to ip address of current device
     cam_name_to_port = {'left':41117,'right':41119}
     port = cam_name_to_port[cam_name]
@@ -355,20 +382,7 @@ def run_server(image, cam_name, stop_event):
             if image_data is None:
                 print('no image received')
                 break
-            
-            # Decode the image
-            cv_image = cv2.imdecode(np.frombuffer(image_data, dtype=np.uint8), cv2.IMREAD_COLOR)
-
-            # process the image
-            if cam_name == 'right':
-                cv_image = cv2.rotate(cv_image, cv2.ROTATE_180)
-            cropped_image = cv_image[480:,480:1440]
-            resized_image = cv2.resize(cropped_image, (640,480), interpolation=cv2.INTER_AREA)
-            rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
-
-            # save to image instance
-            normalized_image = torch.from_numpy(rgb_image / 255.0).float()
-            image[:] = normalized_image
+            img_buf[cam_name] = image_data
 
         except Exception as e:
             print(f"Error: {e}")
@@ -381,54 +395,58 @@ def run_server(image, cam_name, stop_event):
 def main(args):
     tocabi_act = TocabiAct(vars(args))
 
-    # image receiving server
-    mp.set_start_method('spawn')
-    processes = []
-    stop_event = mp.Event()
-    for cam_name in tocabi_act.camera_names:
-        p = mp.Process(target=run_server, args=(tocabi_act.images[cam_name], cam_name, stop_event))
+    with Manager() as manager:
+        tocabi_act.img_buf = manager.dict()
+        for cam_name in tocabi_act.camera_names:
+            tocabi_act.img_buf[cam_name] = None
+        stop_event = mp.Event()
+        processes = []
+
+        # image receiving server
+        for cam_name in tocabi_act.camera_names:
+            p = mp.Process(target=run_server, args=(cam_name, tocabi_act.img_buf, stop_event))
+            p.start()
+            processes.append(p)
+
+        # visualizing images
+        p = mp.Process(target=visualize_img, args=(tocabi_act.camera_names, tocabi_act.img_buf, stop_event))
         p.start()
         processes.append(p)
 
-    # uncomment below for visualizing images
-    # p = mp.Process(target=visualize_img, args=(tocabi_act.images, tocabi_act.camera_names, stop_event))
-    # p.start()
-    # processes.append(p)
+        rospy.init_node('tocabi_act', anonymous=True)
 
-    rospy.init_node('tocabi_act', anonymous=True)
+        joint_sub = rospy.Subscriber("/tocabi/jointstates", JointState, tocabi_act.joint_callback)
 
-    joint_sub = rospy.Subscriber("/tocabi/jointstates", JointState, tocabi_act.joint_callback)
+        mode_sub = rospy.Subscriber("/tocabi/act/mode", Int32, tocabi_act.mode_callback)
 
-    mode_sub = rospy.Subscriber("/tocabi/act/mode", Int32, tocabi_act.mode_callback)
+        inf_time = []
 
-    inf_time = []
+        while not rospy.is_shutdown():
+            if tocabi_act.start:
+                total_time = tocabi_act.inference()
+                inf_time.append(total_time)
+                if tocabi_act.t == tocabi_act.max_timesteps:
+                    print('end!')
+                    tocabi_act.start = False
+                    log = tocabi_act.all_time_actions.clone().detach()
+                    np.save(os.path.join(log_dir, time.strftime('%Y%m%d_%H%M%S.npy', time.localtime())), log.cpu().numpy())
 
-    while not rospy.is_shutdown():
-        if tocabi_act.start:
-            total_time = tocabi_act.inference()
-            inf_time.append(total_time)
-            if tocabi_act.t == tocabi_act.max_timesteps:
-                print('end!')
-                tocabi_act.start = False
-                log = tocabi_act.all_time_actions.clone().detach()
-                np.save(os.path.join(log_dir, time.strftime('%Y%m%d_%H%M%S.npy', time.localtime())), log.cpu().numpy())
+        print('gracefully shutdown ...')
+        stop_event.set()
+        for p in processes:
+            p.join()
 
-    print('gracefully shutdown ...')
-    stop_event.set()
-    for p in processes:
-        p.join()
-
-    plt.title(f'inference time\nmin: {min(inf_time[1:]):.4f} avg: {np.mean(inf_time[1:]):.4f} max: {max(inf_time[1:]):.4f}')
-    plt.plot(inf_time[1:])
-    plt.savefig(os.path.join(log_dir, time.strftime('inference_time_%Y%m%d_%H%M%S.png', time.localtime())))
-    plt.close()
+        plt.title(f'inference time\nmin: {min(inf_time[1:]):.4f} avg: {np.mean(inf_time[1:]):.4f} max: {max(inf_time[1:]):.4f}')
+        plt.plot(inf_time[1:])
+        plt.savefig(os.path.join(log_dir, time.strftime('inference_time_%Y%m%d_%H%M%S.png', time.localtime())))
+        plt.close()
 
 '''
 run with following args
 python real_tocabi_act_tcp.py \
 --policy_class ACT --kl_weight 10 --hidden_dim 512 --batch_size 8 \
 --dim_feedforward 3200 --num_epochs 2000  --lr 1e-5 --seed 0 --temporal_agg \
---chunk_size 30 --task_name real_tocabi_open --ckpt_dir /media/dyros/SSD_2TB/act/ckpt/open_cropped
+--chunk_size 30 --task_name real_tocabi_open --ckpt_dir /media/dyros/SSD2TB/act/ckpt/1_open/stereo_smoothed
 '''
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

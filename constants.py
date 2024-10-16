@@ -8,7 +8,7 @@ SIM_TASK_CONFIGS = {
         # 'dataset_dir': DATA_DIR + '/real_tocabi_open_cropped',
         'num_episodes': 50,
         'episode_len': 600,
-        'camera_names': ['left'],
+        'camera_names': ['left', 'right'],
         'model_dof': 14
     },
 
@@ -16,7 +16,7 @@ SIM_TASK_CONFIGS = {
         'dataset_dir': DATA_DIR + '/real_tocabi_pick_cup_cropped',
         'num_episodes': 50,
         'episode_len': 600,
-        'camera_names': ['left'],
+        'camera_names': ['left', 'right'],
         'model_dof': 14
     },
 
@@ -24,7 +24,7 @@ SIM_TASK_CONFIGS = {
         'dataset_dir': DATA_DIR + '/real_tocabi_insert_cropped',
         'num_episodes': 50,
         'episode_len': 450,
-        'camera_names': ['left'],
+        'camera_names': ['left', 'right'],
         'model_dof': 14
     },
 
