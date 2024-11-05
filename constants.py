@@ -1,9 +1,17 @@
 import pathlib
 
 ### Task parameters
-# DATA_DIR = 'data'
-DATA_DIR = '/media/embodied_ai/SSD2TB/act/data'
+DATA_DIR = '/data/act/data'
+# DATA_DIR = '/media/embodied_ai/SSD2TB/act/data'
 SIM_TASK_CONFIGS = {
+    'real_panda_pick_n_place':{
+        'dataset_dir': DATA_DIR + '/real_panda_pick_n_place',
+        'num_episodes': 100,
+        'episode_len': 650,
+        'camera_names': ['left', 'hand', 'right'],
+        'model_dof': 8
+    },
+
     'real_panda_peg_in_hole':{
         'dataset_dir': DATA_DIR + '/real_panda_peg_in_hole',
         'num_episodes': 48,
@@ -29,10 +37,10 @@ SIM_TASK_CONFIGS = {
     },
 
     'real_tocabi_open':{
-        'dataset_dir': DATA_DIR + '/real_tocabi_open_cropped_smoothed_nose',
+        'dataset_dir': DATA_DIR + '/real_tocabi_open_cropped_smoothed_action',
         'num_episodes': 50,
         'episode_len': 600,
-        'camera_names': ['left'],
+        'camera_names': ['left', 'right'],
         'model_dof': 14
     },
 

@@ -61,6 +61,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
             #     action_len = episode_len - max(0, start_ts - 1) # hack, to make timesteps more aligned
 
             if self.use_waypoint and self.constant_waypoint is None:
+                action = root['/observations/qpos'][start_ts:]
                 waypoints = root['/waypoints'][()]
 
         if self.use_waypoint:
@@ -161,8 +162,8 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
         use_waypoint=use_waypoint, constant_waypoint=constant_waypoint)
     val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats,
         use_waypoint=use_waypoint, constant_waypoint=constant_waypoint)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1, persistent_workers=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1, persistent_workers=True)
 
     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
 

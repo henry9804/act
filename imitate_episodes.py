@@ -384,7 +384,9 @@ def train_bc(train_dataloader, val_dataloader, config):
     train_history = []
     validation_history = []
     min_val_loss = np.inf
+    local_min_val_loss = np.inf
     best_ckpt_info = None
+    local_best_ckpt_info = None
     for epoch in tqdm(range(latest_idx, num_epochs)):
         wandb_log = {}
         # validation
@@ -401,6 +403,9 @@ def train_bc(train_dataloader, val_dataloader, config):
             if epoch_val_loss < min_val_loss:
                 min_val_loss = epoch_val_loss
                 best_ckpt_info = (epoch, min_val_loss, deepcopy(policy.state_dict()))
+            if epoch_val_loss < local_min_val_loss:
+                local_min_val_loss = epoch_val_loss
+                local_best_ckpt_info = (epoch, local_min_val_loss, deepcopy(policy.state_dict()))
         val_summary_string = ''
         for k, v in epoch_summary.items():
             val_summary_string += f'{k}: {v.item():.3f} '
@@ -428,8 +433,6 @@ def train_bc(train_dataloader, val_dataloader, config):
         wandb.log(wandb_log)
 
         if epoch % 100 == 0:
-            ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
-            torch.save(policy.state_dict(), ckpt_path)
             plot_history(train_history, validation_history, epoch, ckpt_dir, seed)
 
             print(f'\nEpoch {epoch}')
@@ -437,6 +440,21 @@ def train_bc(train_dataloader, val_dataloader, config):
             print(val_summary_string)
             print(f'Train loss: {epoch_train_loss:.5f}')
             print(train_summary_string)
+
+        if epoch % 1000 == 0:
+            local_best_epoch, local_min_val_loss, local_best_state_dict = local_best_ckpt_info
+            local_best_ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{local_best_epoch}_seed_{seed}.ckpt')
+            torch.save(local_best_state_dict, local_best_ckpt_path)
+
+            best_epoch, min_val_loss, best_state_dict = best_ckpt_info
+            best_ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{best_epoch}_seed_{seed}.ckpt')
+            torch.save(best_state_dict, best_ckpt_path)
+            
+            print(f'\nTraining result till Epoch {epoch}:\
+                    \n  local best val loss {local_min_val_loss:.6f} at epoch {local_best_epoch}\
+                    \n global best val loss {min_val_loss:.6f} at epoch {best_epoch}')
+            
+            local_min_val_loss = np.inf
 
     ckpt_path = os.path.join(ckpt_dir, f'policy_last.ckpt')
     torch.save(policy.state_dict(), ckpt_path)
@@ -467,13 +485,12 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
         plt.title(key)
         plt.savefig(plot_path)
     print(f'Saved plots to {ckpt_dir}')
-    plt.close()
 
 '''
 python3 imitate_episodes.py \
 --policy_class ACT --kl_weight 10 --chunk_size 30 --hidden_dim 512 \
---batch_size 32 --dim_feedforward 3200 --num_epochs 20000 --lr 3e-5 --seed 0 \
---task_name real_panda_peg_in_hole --ckpt_dir /media/embodied_ai/SSD2TB/act/ckpt/panda/peg_in_hole
+--batch_size 16 --dim_feedforward 3200 --num_epochs 100000 --lr 3e-5 --seed 0 \
+--task_name real_panda_pick_n_place --ckpt_dir /data/act/ckpt/panda/pick_n_place/vanilla
 '''
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
