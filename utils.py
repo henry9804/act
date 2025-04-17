@@ -3,29 +3,22 @@ import torch
 import os
 import h5py
 from torch.utils.data import TensorDataset, DataLoader
+from torchvision import transforms
 
 import IPython
 e = IPython.embed
 
-def relabel_waypoints(arr, waypoint_indices):
-    start_idx = 0
-    for key_idx in waypoint_indices:
-        # Replace the items between the start index and the key index with the key item
-        arr[start_idx:key_idx] = arr[key_idx]
-        start_idx = key_idx
-    return arr
+active_joints = [25, 26, 27, 28, 29, 30, 31, 32, 33] # hardcode, TOCABI right arm + hand
 
-class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats,
-        use_waypoint=False, constant_waypoint=None):
-        super(EpisodicDataset).__init__()
+class EpisodicJointDataset(torch.utils.data.Dataset):
+    def __init__(self, episode_ids, dataset_dir, camera_names, chunk_size, norm_stats):
+        super(EpisodicJointDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
+        self.chunk_size = chunk_size
         self.norm_stats = norm_stats
         self.is_sim = None
-        self.use_waypoint = use_waypoint
-        self.constant_waypoint = constant_waypoint
         self.__getitem__(0) # initialize self.is_sim
 
     def __len__(self):
@@ -38,56 +31,29 @@ class EpisodicDataset(torch.utils.data.Dataset):
         dataset_path = os.path.join(self.dataset_dir, f'episode_{episode_id}.hdf5')
         with h5py.File(dataset_path, 'r') as root:
             is_sim = root.attrs['sim']
-            original_action_shape = root['/action'].shape
-            episode_len = original_action_shape[0]
+            episode_len = root['/action'].shape[0] - 120    # hardcode, do not train moving to ready pose
             if sample_full_episode:
                 start_ts = 0
             else:
                 start_ts = np.random.choice(episode_len)
             # get observation at start_ts only
-            qpos = root['/observations/qpos'][start_ts]
-            qvel = root['/observations/qvel'][start_ts]
+            qpos = root['/observations/qpos'][start_ts, active_joints]
             image_dict = dict()
             for cam_name in self.camera_names:
-                image_dict[cam_name] = root[f'/observations/images/{cam_name}'][start_ts]
+                if cam_name.endswith('stereo'):
+                    left_img = root[f'/observations/images/{cam_name[:-6]}left'][start_ts]
+                    right_img = root[f'/observations/images/{cam_name[:-6]}right'][start_ts]
+                    image_dict[cam_name] = np.concatenate([left_img, right_img], axis=1) # width dimension
+                else:
+                    image_dict[cam_name] = root[f'/observations/images/{cam_name}'][start_ts]
             # get all actions after and including start_ts
-            action = root['/action'][start_ts:]
-            action_len = episode_len - start_ts
-            # if is_sim:
-            #     action = root['/action'][start_ts:]
-            #     action_len = episode_len - start_ts
-            # else:
-            #     action = root['/action'][max(0, start_ts - 1):] # hack, to make timesteps more aligned
-            #     action_len = episode_len - max(0, start_ts - 1) # hack, to make timesteps more aligned
-
-            if self.use_waypoint and self.constant_waypoint is None:
-                action = root['/observations/qpos'][start_ts:]
-                waypoints = root['/waypoints'][()]
-
-        if self.use_waypoint:
-            # constant waypoints
-            if self.constant_waypoint is not None:
-                assert self.constant_waypoint > 0
-                waypoints = np.arange(1, action_len, self.constant_waypoint)
-                if len(waypoints) == 0:
-                    waypoints = np.array([action_len - 1])
-                elif waypoints[-1] != action_len - 1:
-                    waypoints = np.append(waypoints, action_len - 1)
-            # auto waypoints
-            else:
-                waypoints = waypoints - start_ts
-                waypoints = waypoints[waypoints >= 0]
-                waypoints = waypoints[waypoints < action_len]
-                waypoints = np.append(waypoints, action_len - 1)
-                waypoints = np.unique(waypoints)
-                waypoints = waypoints.astype(np.int32)
-
-            action = relabel_waypoints(action, waypoints)
+            action = root['/action'][start_ts:min(start_ts+self.chunk_size, episode_len), active_joints]
+            action_len, action_dof = action.shape
 
         self.is_sim = is_sim
-        padded_action = np.zeros(original_action_shape, dtype=np.float32)
+        padded_action = np.zeros((self.chunk_size, action_dof), dtype=np.float32)
         padded_action[:action_len] = action
-        is_pad = np.zeros(episode_len)
+        is_pad = np.zeros(self.chunk_size)
         is_pad[action_len:] = 1
 
         # new axis for different cameras
@@ -104,6 +70,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
 
         # channel last
         image_data = torch.einsum('k h w c -> k c h w', image_data)
+        image_data = transforms.Resize((480, 1280))(image_data) # hardcode for TOCABI stereo data
 
         # normalize image and change dtype to float
         image_data = image_data / 255.0
@@ -113,40 +80,42 @@ class EpisodicDataset(torch.utils.data.Dataset):
         return image_data, qpos_data, action_data, is_pad
 
 
-def get_norm_stats(dataset_dir, num_episodes):
+def get_joint_norm_stats(dataset_dir, num_episodes):
     all_qpos_data = []
     all_action_data = []
     for episode_idx in range(num_episodes):
         dataset_path = os.path.join(dataset_dir, f'episode_{episode_idx}.hdf5')
         with h5py.File(dataset_path, 'r') as root:
-            qpos = root['/observations/qpos'][()]
-            qvel = root['/observations/qvel'][()]
-            action = root['/action'][()]
-        all_qpos_data.append(torch.from_numpy(qpos))
-        all_action_data.append(torch.from_numpy(action))
-    all_qpos_data = torch.stack(all_qpos_data)
-    all_action_data = torch.stack(all_action_data)
+            qpos = root['/observations/qpos'][:,active_joints]
+            action = root['/action'][:,active_joints]
+        all_qpos_data.append(torch.from_numpy(qpos[:,:-1]))   # do not normalize binary gripper state
+        all_action_data.append(torch.from_numpy(action[:,:-1]))
+    all_qpos_data = torch.cat(all_qpos_data)
+    all_action_data = torch.cat(all_action_data)
     all_action_data = all_action_data
 
     # normalize action data
-    action_mean = all_action_data.mean(dim=[0, 1], keepdim=True)
-    action_std = all_action_data.std(dim=[0, 1], keepdim=True)
-    action_std = torch.clip(action_std, 1e-2, np.inf) # clipping
+    action_mean = np.zeros_like(action[0], dtype=np.float32)
+    action_mean[:-1] = all_action_data.mean(dim=0, keepdim=True)
+    action_std = np.ones_like(action[0], dtype=np.float32)
+    action_std[:-1] = all_action_data.std(dim=0, keepdim=True)
+    action_std = action_std.clip(1e-2, np.inf) # clipping
 
     # normalize qpos data
-    qpos_mean = all_qpos_data.mean(dim=[0, 1], keepdim=True)
-    qpos_std = all_qpos_data.std(dim=[0, 1], keepdim=True)
-    qpos_std = torch.clip(qpos_std, 1e-2, np.inf) # clipping
+    qpos_mean = np.zeros_like(qpos[0], dtype=np.float32)
+    qpos_mean[:-1] = all_qpos_data.mean(dim=0, keepdim=True)
+    qpos_std = np.ones_like(qpos[0], dtype=np.float32)
+    qpos_std[:-1] = all_qpos_data.std(dim=0, keepdim=True)
+    qpos_std = qpos_std.clip(1e-2, np.inf) # clipping
 
-    stats = {"action_mean": action_mean.numpy().squeeze(), "action_std": action_std.numpy().squeeze(),
-             "qpos_mean": qpos_mean.numpy().squeeze(), "qpos_std": qpos_std.numpy().squeeze(),
+    stats = {"action_mean": action_mean, "action_std": action_std,
+             "qpos_mean": qpos_mean, "qpos_std": qpos_std,
              "example_qpos": qpos}
 
     return stats
 
 
-def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val,
-    use_waypoint=False, constant_waypoint=None):
+def load_joint_data(dataset_dir, num_episodes, camera_names, chunk_size, batch_size_train, batch_size_val):
     print(f'\nData from: {dataset_dir}\n')
     # obtain train test split
     train_ratio = 0.8
@@ -155,15 +124,138 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     val_indices = shuffled_indices[int(train_ratio * num_episodes):]
 
     # obtain normalization stats for qpos and action
-    norm_stats = get_norm_stats(dataset_dir, num_episodes)
+    norm_stats = get_joint_norm_stats(dataset_dir, num_episodes)
 
     # construct dataset and dataloader
-    train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats,
-        use_waypoint=use_waypoint, constant_waypoint=constant_waypoint)
-    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats,
-        use_waypoint=use_waypoint, constant_waypoint=constant_waypoint)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1, persistent_workers=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1, persistent_workers=True)
+    train_dataset = EpisodicJointDataset(train_indices, dataset_dir, camera_names, chunk_size, norm_stats)
+    val_dataset = EpisodicJointDataset(val_indices, dataset_dir, camera_names, chunk_size, norm_stats)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
+
+    return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
+
+
+class EpisodicPoseDataset(torch.utils.data.Dataset):
+    def __init__(self, episode_ids, dataset_dir, camera_names, chunk_size, norm_stats):
+        super(EpisodicPoseDataset).__init__()
+        self.episode_ids = episode_ids
+        self.dataset_dir = dataset_dir
+        self.camera_names = camera_names
+        self.chunk_size = chunk_size
+        self.norm_stats = norm_stats
+        self.is_sim = None
+        self.__getitem__(0) # initialize self.is_sim
+
+    def __len__(self):
+        return len(self.episode_ids)
+
+    def __getitem__(self, index):
+        sample_full_episode = False # hardcode
+
+        episode_id = self.episode_ids[index]
+        dataset_path = os.path.join(self.dataset_dir, f'episode_{episode_id}.hdf5')
+        with h5py.File(dataset_path, 'r') as root:
+            is_sim = root.attrs['sim']
+            episode_len = root['/observations/ee_pose_rel'].shape[0] - 120  # hardcode for TOCABI data, do not train moving to ready pose
+            if sample_full_episode:
+                start_ts = 0
+            else:
+                start_ts = np.random.choice(episode_len)
+            # get observation at start_ts only
+            qpos = root['/observations/ee_pose_rel'][start_ts]
+            image_dict = dict()
+            for cam_name in self.camera_names:
+                if cam_name.endswith('stereo'):
+                    left_img = root[f'/observations/images/{cam_name[:-6]}left'][start_ts]
+                    right_img = root[f'/observations/images/{cam_name[:-6]}right'][start_ts]
+                    image_dict[cam_name] = np.concatenate([left_img, right_img], axis=1) # width dimension
+                else:
+                    image_dict[cam_name] = root[f'/observations/images/{cam_name}'][start_ts]
+            # get all actions after and including start_ts
+            action = root['/ee_action_rel'][start_ts:min(start_ts+self.chunk_size, episode_len)]
+            action_len, action_dof = action.shape
+
+        self.is_sim = is_sim
+        padded_action = np.zeros((self.chunk_size, action_dof), dtype=np.float32)
+        padded_action[:action_len] = action
+        is_pad = np.zeros(self.chunk_size)
+        is_pad[action_len:] = 1
+
+        # new axis for different cameras
+        all_cam_images = []
+        for cam_name in self.camera_names:
+            all_cam_images.append(image_dict[cam_name])
+        all_cam_images = np.stack(all_cam_images, axis=0)
+
+        # construct observations
+        image_data = torch.from_numpy(all_cam_images)
+        qpos_data = torch.from_numpy(qpos).float()
+        action_data = torch.from_numpy(padded_action).float()
+        is_pad = torch.from_numpy(is_pad).bool()
+
+        # channel last
+        image_data = torch.einsum('k h w c -> k c h w', image_data)
+        image_data = transforms.Resize((480, 1280))(image_data) # hardcode for TOCABI stereo data
+
+        # normalize image and change dtype to float
+        image_data = image_data / 255.0
+        action_data = (action_data - self.norm_stats["action_mean"]) / self.norm_stats["action_std"]
+        qpos_data = (qpos_data - self.norm_stats["qpos_mean"]) / self.norm_stats["qpos_std"]
+
+        return image_data, qpos_data, action_data, is_pad
+
+
+def get_pose_norm_stats(dataset_dir, num_episodes):
+    all_qpos_data = []
+    all_action_data = []
+    for episode_idx in range(num_episodes):
+        dataset_path = os.path.join(dataset_dir, f'episode_{episode_idx}.hdf5')
+        with h5py.File(dataset_path, 'r') as root:
+            qpos = root['/observations/ee_pose_rel'][()]
+            action = root['/ee_action_rel'][()]
+        all_qpos_data.append(torch.from_numpy(qpos[:,9:12])) # do not normalize 9D roation & binary gripper state
+        all_action_data.append(torch.from_numpy(action[:,9:12]))
+    all_qpos_data = torch.cat(all_qpos_data)
+    all_action_data = torch.cat(all_action_data)
+    all_action_data = all_action_data
+
+    # normalize action data
+    action_mean = np.zeros(13, dtype=np.float32)
+    action_mean[9:12] = all_action_data.mean(dim=0).numpy()
+    action_std = np.ones(13, dtype=np.float32)
+    action_std[9:12] = all_action_data.std(dim=0).numpy()
+    action_std = action_std.clip(1e-2, np.inf) # clipping
+
+    # normalize qpos data
+    qpos_mean = np.zeros(13, dtype=np.float32)
+    qpos_mean[9:12] = all_qpos_data.mean(dim=0).numpy()
+    qpos_std = np.ones(13, dtype=np.float32)
+    qpos_std[9:12] = all_qpos_data.std(dim=0).numpy()
+    qpos_std = qpos_std.clip(1e-2, np.inf) # clipping
+
+    stats = {"action_mean": action_mean, "action_std": action_std,
+             "qpos_mean": qpos_mean, "qpos_std": qpos_std,
+             "example_qpos": qpos}
+
+    return stats
+
+
+def load_pose_data(dataset_dir, num_episodes, camera_names, chunk_size, batch_size_train, batch_size_val):
+    print(f'\nData from: {dataset_dir}\n')
+    # obtain train test split
+    train_ratio = 0.8
+    shuffled_indices = np.random.permutation(num_episodes)
+    train_indices = shuffled_indices[:int(train_ratio * num_episodes)]
+    val_indices = shuffled_indices[int(train_ratio * num_episodes):]
+
+    # obtain normalization stats for qpos and action
+    norm_stats = get_pose_norm_stats(dataset_dir, num_episodes)
+
+    # construct dataset and dataloader
+    train_dataset = EpisodicPoseDataset(train_indices, dataset_dir, camera_names, chunk_size, norm_stats)
+    val_dataset = EpisodicPoseDataset(val_indices, dataset_dir, camera_names, chunk_size, norm_stats)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
 
     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
 
