@@ -28,13 +28,20 @@ class ACTPolicy(nn.Module):
             is_pad = is_pad[:, :self.model.num_queries]
 
             a_hat, is_pad_hat, (mu, logvar) = self.model(qpos, image, env_state, actions, is_pad)
+            # kl divergence loss
             total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar) # train with CVAE encoder
-            loss_dict = dict()
-            all_l1 = F.l1_loss(actions, a_hat, reduction='none')
+            # position l1 loss
+            all_l1 = F.l1_loss(actions[:,:,:-1], a_hat[:,:,:-1], reduction='none')
             l1 = (all_l1 * ~is_pad.unsqueeze(-1)).mean()
+            # gripper state binary cross entropy loss
+            all_bce = F.binary_cross_entropy_with_logits(a_hat[:,:,-1:], actions[:,:,-1:], reduction='none')
+            bce = (all_bce * ~is_pad.unsqueeze(-1)).mean()
+            # total loss
+            loss_dict = dict()
             loss_dict['l1'] = l1
+            loss_dict['bce'] = bce
             loss_dict['kl'] = total_kld[0]  # train with CVAE encoder
-            loss_dict['loss'] = loss_dict['l1'] + loss_dict['kl'] * self.kl_weight  # train with CVAE encoder
+            loss_dict['loss'] = loss_dict['l1'] + loss_dict['bce'] + loss_dict['kl'] * self.kl_weight  # train with CVAE encoder
             # loss_dict['loss'] = loss_dict['l1'] # train without CVAE encoder
             return loss_dict
         else: # inference time
