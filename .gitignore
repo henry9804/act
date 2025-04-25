@@ -4,6 +4,7 @@ wandb
 outputs
 data
 data_local
+ckpt
 .vscode
 _wandb
 
@@ -138,5 +139,3 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-
-ckpt/

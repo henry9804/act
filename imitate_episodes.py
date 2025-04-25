@@ -7,14 +7,16 @@ import matplotlib.pyplot as plt
 from copy import deepcopy
 from tqdm import tqdm
 from einops import rearrange
+import wandb
+import time
 
 from constants import DT
 from constants import PUPPET_GRIPPER_JOINT_OPEN
 from constants import SIM_TASK_CONFIGS
-from utils import load_data # data functions
+from utils import load_joint_data, load_pose_data # data functions
 from utils import sample_box_pose, sample_insertion_pose # robot functions
 from utils import compute_dict_mean, set_seed, detach_dict # helper functions
-from policy import ACTPolicy, CNNMLPPolicy
+from policy import ACTPolicy, ACTTaskPolicy, CNNMLPPolicy
 from visualize_episodes import save_videos
 
 from sim_env import BOX_POSE
@@ -33,6 +35,12 @@ def main(args):
     batch_size_train = args['batch_size']
     batch_size_val = args['batch_size']
     num_epochs = args['num_epochs']
+    use_waypoint = args['use_waypoint']
+    constant_waypoint = args['constant_waypoint']
+    if use_waypoint:
+        print('Using waypoint')
+    if constant_waypoint is not None:
+        print(f'Constant waypoint: {constant_waypoint}')
 
     # get task parameters
     is_sim = task_name[:4] == 'sim_'
@@ -41,12 +49,15 @@ def main(args):
     num_episodes = task_config['num_episodes']
     episode_len = task_config['episode_len']
     camera_names = task_config['camera_names']
-    state_dim = task_config['model_dof']
+    if policy_class == 'ACTTask':
+        state_dim = 10
+    else:
+        state_dim = task_config['model_dof']
 
     # fixed parameters
     lr_backbone = 1e-5
     backbone = 'resnet18'
-    if policy_class == 'ACT':
+    if policy_class.startswith('ACT'):
         enc_layers = 4
         dec_layers = 7
         nheads = 8
@@ -85,6 +96,24 @@ def main(args):
         'real_robot': not is_sim
     }
 
+    wandb.login(key = '7afe8f0cb860fa959ee2daf0f8ba40575f703063')
+    wandb.init(
+        project=task_name,
+        config={
+            "dataset": dataset_dir,
+            "camera names": camera_names,
+            "model dof": state_dim,
+            "num episodes": num_episodes,
+            "ckpt dir": ckpt_dir,
+            "chunk size": args['chunk_size'],
+            "batch size": batch_size_train,
+            "epochs": num_epochs,
+            "lr": args['lr'],
+            "seed": args['seed']
+        },
+        name=time.strftime('%Y%m%d_%H%M%S')
+    )
+    
     if is_eval:
         ckpt_names = [f'policy_best.ckpt']
         results = []
@@ -97,7 +126,10 @@ def main(args):
         print()
         exit()
 
-    train_dataloader, val_dataloader, stats, _ = load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val)
+    if policy_class == 'ACTTask':
+        train_dataloader, val_dataloader, stats, _ = load_pose_data(dataset_dir, num_episodes, camera_names, args['chunk_size'], batch_size_train, batch_size_val)
+    else:
+        train_dataloader, val_dataloader, stats, _ = load_joint_data(dataset_dir, num_episodes, camera_names, args['chunk_size'], batch_size_train, batch_size_val)
 
     # save dataset stats
     if not os.path.isdir(ckpt_dir):
@@ -106,18 +138,25 @@ def main(args):
     with open(stats_path, 'wb') as f:
         pickle.dump(stats, f)
 
-    best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)
-    best_epoch, min_val_loss, best_state_dict = best_ckpt_info
+    train_best_ckpt_info, best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)
 
     # save best checkpoint
-    ckpt_path = os.path.join(ckpt_dir, f'policy_best.ckpt')
-    torch.save(best_state_dict, ckpt_path)
-    print(f'Best ckpt, val loss {min_val_loss:.6f} @ epoch{best_epoch}')
+    if train_best_ckpt_info is not None:
+        train_best_epoch, min_train_loss, train_best_state_dict = train_best_ckpt_info
+        train_best_ckpt_path = os.path.join(ckpt_dir, f'policy_train_best.ckpt')
+        torch.save(train_best_state_dict, train_best_ckpt_path)
+
+    if best_ckpt_info is not None:
+        best_epoch, min_val_loss, best_state_dict = best_ckpt_info
+        best_ckpt_path = os.path.join(ckpt_dir, f'policy_val_best.ckpt')
+        torch.save(best_state_dict, best_ckpt_path)
 
 
 def make_policy(policy_class, policy_config):
     if policy_class == 'ACT':
         policy = ACTPolicy(policy_config)
+    elif policy_class == 'ACTTask':
+        policy = ACTTaskPolicy(policy_config)
     elif policy_class == 'CNNMLP':
         policy = CNNMLPPolicy(policy_config)
     else:
@@ -127,6 +166,8 @@ def make_policy(policy_class, policy_config):
 
 def make_optimizer(policy_class, policy):
     if policy_class == 'ACT':
+        optimizer = policy.configure_optimizers()
+    elif policy_class == 'ACTTask':
         optimizer = policy.configure_optimizers()
     elif policy_class == 'CNNMLP':
         optimizer = policy.configure_optimizers()
@@ -326,34 +367,42 @@ def train_bc(train_dataloader, val_dataloader, config):
     set_seed(seed)
 
     policy = make_policy(policy_class, policy_config)
+    # if ckpt_dir is not empty, prompt the user to load the checkpoint
+    if os.path.isdir(ckpt_dir) and len(os.listdir(ckpt_dir)) > 1:
+        print(f"Checkpoint directory {ckpt_dir} is not empty. Load checkpoint? (y/n)")
+        load_ckpt = input()
+        if load_ckpt == "y":
+            # load the latest checkpoint
+            latest_idx = max(
+                [
+                    int(f.split("_")[2])
+                    for f in os.listdir(ckpt_dir)
+                    if f.startswith("policy_epoch_")
+                ]
+            )
+            ckpt_path = os.path.join(
+                ckpt_dir, f"policy_epoch_{latest_idx}_seed_{seed}.ckpt"
+            )
+            print(f"Loading checkpoint from {ckpt_path}")
+            loading_status = policy.load_state_dict(torch.load(ckpt_path))
+            print(loading_status)
+        else:
+            print("Not loading checkpoint")
+            latest_idx = 0
+    else:
+        latest_idx = 0
+
     policy.cuda()
     optimizer = make_optimizer(policy_class, policy)
 
     train_history = []
     validation_history = []
-    min_val_loss = np.inf
+    min_train_loss = [np.inf, np.inf]
+    min_val_loss = [np.inf, np.inf]
+    train_best_ckpt_info = None
     best_ckpt_info = None
-    for epoch in tqdm(range(num_epochs)):
-        print(f'\nEpoch {epoch}')
-        # validation
-        with torch.inference_mode():
-            policy.eval()
-            epoch_dicts = []
-            for batch_idx, data in enumerate(val_dataloader):
-                forward_dict = forward_pass(data, policy)
-                epoch_dicts.append(forward_dict)
-            epoch_summary = compute_dict_mean(epoch_dicts)
-            validation_history.append(epoch_summary)
-
-            epoch_val_loss = epoch_summary['loss']
-            if epoch_val_loss < min_val_loss:
-                min_val_loss = epoch_val_loss
-                best_ckpt_info = (epoch, min_val_loss, deepcopy(policy.state_dict()))
-        print(f'Val loss:   {epoch_val_loss:.5f}')
-        summary_string = ''
-        for k, v in epoch_summary.items():
-            summary_string += f'{k}: {v.item():.3f} '
-        print(summary_string)
+    for epoch in tqdm(range(latest_idx, num_epochs)):
+        wandb_log = {}
 
         # training
         policy.train()
@@ -366,31 +415,89 @@ def train_bc(train_dataloader, val_dataloader, config):
             optimizer.step()
             optimizer.zero_grad()
             train_history.append(detach_dict(forward_dict))
-        epoch_summary = compute_dict_mean(train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)])
+        e = epoch - latest_idx
+        epoch_summary = compute_dict_mean(train_history[(batch_idx+1)*e:(batch_idx+1)*(epoch+1)])
         epoch_train_loss = epoch_summary['loss']
-        print(f'Train loss: {epoch_train_loss:.5f}')
-        summary_string = ''
+        train_summary_string = '    '
         for k, v in epoch_summary.items():
-            summary_string += f'{k}: {v.item():.3f} '
-        print(summary_string)
+            train_summary_string += f'{k}: {v.item():.3f} '
+            wandb_log[f'Train {k}'] = v.item()
 
+        # validation
+        with torch.inference_mode():
+            policy.eval()
+            epoch_dicts = []
+            for batch_idx, data in enumerate(val_dataloader):
+                forward_dict = forward_pass(data, policy)
+                epoch_dicts.append(forward_dict)
+            epoch_summary = compute_dict_mean(epoch_dicts)
+            validation_history.append(epoch_summary)
+            epoch_val_loss = epoch_summary['loss']
+        val_summary_string = '    '
+        for k, v in epoch_summary.items():
+            val_summary_string += f'{k}: {v.item():.3f} '
+            wandb_log[f'Val {k}'] = v.item()
+        
+        wandb.log(wandb_log)
+
+        if epoch_train_loss < min_train_loss[0]:
+            min_train_loss = [epoch_train_loss, epoch_val_loss]
+            train_best_ckpt_info = (epoch, min_train_loss, deepcopy(policy.state_dict()))
+        if epoch_val_loss < min_val_loss[1]:
+            min_val_loss = [epoch_train_loss, epoch_val_loss]
+            best_ckpt_info = (epoch, min_val_loss, deepcopy(policy.state_dict()))
+        
         if epoch % 100 == 0:
-            ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
-            torch.save(policy.state_dict(), ckpt_path)
             plot_history(train_history, validation_history, epoch, ckpt_dir, seed)
+
+        if epoch % 1000 == 0:
+            if train_best_ckpt_info is not None:
+                train_best_epoch, min_train_loss, train_best_state_dict = train_best_ckpt_info
+                train_best_ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{train_best_epoch}_seed_{seed}.ckpt')
+                torch.save(train_best_state_dict, train_best_ckpt_path)
+
+            if best_ckpt_info is not None:
+                best_epoch, min_val_loss, best_state_dict = best_ckpt_info
+                best_ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{best_epoch}_seed_{seed}.ckpt')
+                torch.save(best_state_dict, best_ckpt_path)
+
+            print(f'\nTraining result till Epoch {epoch}:')
+            print(f'  Val loss:   {epoch_val_loss:.6f}')
+            print(val_summary_string)
+            print(f'  Train loss: {epoch_train_loss:.6f}')
+            print(train_summary_string)
+            print(f'  Best train loss at epoch {train_best_epoch}')
+            print(f'    Train loss:  {min_train_loss[0]:.6f} Val loss: {min_train_loss[1]:.6f}')
+            print(f'  Best val loss at epoch {best_epoch}')
+            print(f'    Train loss: {min_val_loss[0]:.6f} Val loss: {min_val_loss[1]:.6f}')
 
     ckpt_path = os.path.join(ckpt_dir, f'policy_last.ckpt')
     torch.save(policy.state_dict(), ckpt_path)
 
-    best_epoch, min_val_loss, best_state_dict = best_ckpt_info
-    ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{best_epoch}_seed_{seed}.ckpt')
-    torch.save(best_state_dict, ckpt_path)
-    print(f'Training finished:\nSeed {seed}, val loss {min_val_loss:.6f} at epoch {best_epoch}')
+    if train_best_ckpt_info is not None:
+        train_best_epoch, min_train_loss, train_best_state_dict = train_best_ckpt_info
+        train_best_ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{train_best_epoch}_seed_{seed}.ckpt')
+        torch.save(train_best_state_dict, train_best_ckpt_path)
 
+    if best_ckpt_info is not None:
+        best_epoch, min_val_loss, best_state_dict = best_ckpt_info
+        best_ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{best_epoch}_seed_{seed}.ckpt')
+        torch.save(best_state_dict, best_ckpt_path)
+
+    print(f'\Training finished:')
+    print(f'  Val loss:   {epoch_val_loss:.5f}')
+    print(val_summary_string)
+    print(f'  Train loss: {epoch_train_loss:.5f}')
+    print(train_summary_string)
+    print(f'  Best train loss at epoch {train_best_epoch}')
+    print(f'    train loss:  {min_train_loss[0]:.5f} val loss: {min_train_loss[1]:.5f}')
+    print(f'  Best val loss at epoch {best_epoch}')
+    print(f'    train loss: {min_val_loss[0]:.5f} val loss: {min_val_loss[1]:.5f}')
+    
     # save training curves
     plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed)
 
-    return best_ckpt_info
+    return train_best_ckpt_info, best_ckpt_info
 
 
 def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
@@ -407,13 +514,13 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
         plt.legend()
         plt.title(key)
         plt.savefig(plot_path)
-    print(f'Saved plots to {ckpt_dir}')
+    # print(f'Saved plots to {ckpt_dir}')
 
 '''
-python3 imitate_episodes.py \
---task_name real_tocabi_pick --ckpt_dir ckpt/pick_60_episode_2 --policy_class ACT \
---kl_weight 10 --chunk_size 30 --hidden_dim 512 --batch_size 32 \
---dim_feedforward 3200 --num_epochs 10000 --lr 3e-5 --seed 0
+python imitate_episodes.py \
+--policy_class ACTTask --kl_weight 10 --chunk_size 30 --hidden_dim 512 \
+--batch_size 8 --dim_feedforward 3200 --num_epochs 5000 --lr 1e-5 --seed 0 \
+--task_name real_tocabi_pick_n_place --ckpt_dir /media/lyh/SSD2TB/act/ckpt/tocabi/real_tocabi_pick_n_place/ee_global
 '''
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -434,4 +541,8 @@ if __name__ == '__main__':
     parser.add_argument('--dim_feedforward', action='store', type=int, help='dim_feedforward', required=False)
     parser.add_argument('--temporal_agg', action='store_true')
     
+    # for waypoints
+    parser.add_argument('--use_waypoint', action='store_true')
+    parser.add_argument('--constant_waypoint', action='store', type=int, help='constant_waypoint', required=False)
+
     main(vars(parser.parse_args()))

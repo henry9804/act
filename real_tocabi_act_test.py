@@ -2,6 +2,7 @@ import os
 import time
 import numpy as np
 import argparse
+from matplotlib import pyplot as plt
 
 import rospy
 from sensor_msgs.msg import CompressedImage
@@ -52,6 +53,52 @@ q_init = np.array([0.0, 0.0, -0.24, 0.6, -0.36, 0.0,
                    0.3, 0.3, 1.5, -1.27, -1, 0.0, -1, 0.0,
                    0.0, 0.0,
                    -0.3, -0.9, -1.5, 1.57, 1.9, 0.0, 0.6, 0.0])
+
+def visualize_joints(qpos_list, action_list, output_list, plot_path=None, ylim=None, label_overwrite=None):
+    if label_overwrite:
+        label1, label2, label3 = label_overwrite
+    else:
+        label1, label2, label3 = 'State', 'Action', 'Output'
+
+    qpos = np.array(qpos_list) # ts, dim
+    command = np.array(action_list)
+    output = np.array(output_list)
+    num_ts, num_dim = qpos.shape
+    h, w = 2, num_dim
+    num_figs = num_dim
+    fig, axs = plt.subplots(num_figs, 1, figsize=(w, h * num_figs))
+
+    # plot joint state
+    for dim_idx in range(num_dim):
+        ax = axs[dim_idx]
+        ax.plot(qpos[:, dim_idx], label=label1)
+        if dim_idx == num_dim-1:
+            ax.set_title(f'Joint {dim_idx}: R_Hand')
+        else:
+            ax.set_title(f'Joint {dim_idx}: {joint_name[joint_index[dim_idx]]}')
+        ax.legend()
+
+    # plot arm command
+    for dim_idx in range(num_dim):
+        ax = axs[dim_idx]
+        ax.plot(command[:, dim_idx], label=label2)
+        ax.legend()
+
+    # plot act output
+    for dim_idx in range(num_dim):
+        ax = axs[dim_idx]
+        ax.plot(output[:, dim_idx], label=label3)
+        ax.legend()
+
+    if ylim:
+        for dim_idx in range(num_dim):
+            ax = axs[dim_idx]
+            ax.set_ylim(ylim)
+
+    plt.tight_layout()
+    plt.savefig(plot_path)
+    print(f'Saved qpos plot to: {plot_path}')
+    plt.close()
 
 class TocabiAct:
     def __init__(self, args):
@@ -151,7 +198,7 @@ class TocabiAct:
 
             self.t += 1
         
-        return final_action
+        return action, final_action
 
 
 def load_hdf5(dataset_dir, dataset_name):
@@ -184,11 +231,12 @@ def main(args):
 
     turbo_jpeg = TurboJPEG()
 
-    dataset_dir = '/media/embodied_ai/SSD2TB/act/data/real_tocabi_pick_cup_cropped'
+    dataset_dir = '/media/embodied_ai/SSD2TB/act/data/real_tocabi_pick_cup_cropped_smoothed_action'
     episode_index = 50
     qpos, qvel, action, image_dict = load_hdf5(dataset_dir, f'episode_{episode_index}')
     print('done loading hdf5 file!')
 
+    inf_pos = []
     inf_time = []
     max_timestep = len(qpos)
     for i in range(max_timestep):
@@ -206,7 +254,7 @@ def main(args):
             current_state.state.joint_state.position[j] = q
         current_state_pub.publish(current_state)
 
-        # publish images        
+        # publish images
         left_img = image_dict['left'][i]
         compress_img_l = turbo_jpeg.encode(left_img, quality=QUALITY, pixel_format=TJPF_RGB)
         img_l_msg = CompressedImage()
@@ -226,8 +274,11 @@ def main(args):
         # calculate and publish target pose
         qpos_numpy = np.array(qpos[i])
         left_torch_img = rearrange(left_img, 'h w c -> c h w')
-        curr_image = np.stack([left_torch_img], axis=0)
-        goal_pos = tocabi_act.inference(qpos_numpy, curr_image)
+        right_torch_img = rearrange(right_img, 'h w c -> c h w')
+        curr_image = np.stack([left_torch_img, right_torch_img], axis=0)
+        next_pos, goal_pos = tocabi_act.inference(qpos_numpy, curr_image)
+
+        inf_pos.append(next_pos)
 
         goal_state = DisplayRobotState()
         goal_state.state.joint_state.header.stamp = rospy.Time.now()
@@ -250,6 +301,7 @@ def main(args):
         if (time.time() - start) < 1/FPS:
             time.sleep(1/FPS - (time.time() - start))
 
+    visualize_joints(qpos, action, inf_pos, plot_path=os.path.join(vars(args)['ckpt_dir'], f'episode_{episode_index}_result.svg'))
     print(f'inference time\nmin: {min(inf_time[1:]):.4f} avg: {np.mean(inf_time[1:]):.4f} max: {max(inf_time[1:]):.4f}')
 
 '''
@@ -257,7 +309,7 @@ run with following args
 python real_tocabi_act_test.py \
 --policy_class ACT --kl_weight 10 --hidden_dim 512 --batch_size 8 \
 --dim_feedforward 3200 --num_epochs 2000  --lr 1e-5 --seed 0 --temporal_agg \
---chunk_size 30 --task_name real_tocabi_pick_cup --ckpt_dir /media/embodied_ai/SSD2TB/act/ckpt/pick_cup_cropped
+--chunk_size 30 --task_name real_tocabi_open --ckpt_dir /media/embodied_ai/SSD2TB/act/ckpt/2_pick_cup/stereo_smoothed
 '''
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -280,9 +332,3 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     main(args)
-
-
-
-
-
-

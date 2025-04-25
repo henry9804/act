@@ -53,7 +53,7 @@ def main(args):
         qpos, qvel, action, image_dict = load_hdf5(dataset_dir, dataset_name)
         save_videos(image_dict, DT, video_path=os.path.join(dataset_dir, dataset_name + '_video.mp4'))
         # visualize_joints_all(qpos, axs_all)
-        visualize_joints(qpos, action, plot_path=os.path.join(dataset_dir, dataset_name + '_qpos.png'))
+        visualize_joints(qpos, action, plot_path=os.path.join(dataset_dir, dataset_name + '_qpos.svg'))
         # visualize_timestamp(t_list, dataset_path) # TODO addn timestamp back
     # plt.show()
 
