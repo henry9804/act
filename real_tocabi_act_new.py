@@ -65,6 +65,8 @@ class TocabiAct:
         self.camera_names = task_config['camera_names']
         self.max_timesteps = int(episode_len * 1.5)
         self.hand_open = 0
+        self.pelvis_TF = TF_mat()
+        self.head_TF = TF_mat()
 
         policy_config = {'lr': args['lr'],
                         'num_queries': args['chunk_size'],
@@ -116,8 +118,6 @@ class TocabiAct:
         self.terminate = True
         self.all_actions = None
         self.img_msgs = {}
-        self.pelvis_TF = TF_mat()
-        self.head_TF = TF_mat()
 
         self.joint_target_pub = rospy.Publisher("/tocabi/act/joint_target", JointState, queue_size=1)
         self.pose_target_pub = rospy.Publisher("/tocabi/act/pose_target", PoseStamped, queue_size=1)
@@ -239,7 +239,7 @@ class TocabiAct:
                     actions_for_curr_step = self.all_time_actions[:, self.t+24]
                     actions_populated = torch.all(actions_for_curr_step != 0, axis=1)
                     actions_for_curr_step = actions_for_curr_step[actions_populated]
-                    k = 10
+                    k = 0.1
                     exp_weights = np.exp(-k * np.arange(len(actions_for_curr_step)))
                     exp_weights = exp_weights / exp_weights.sum()
                     exp_weights = torch.from_numpy(exp_weights).cuda().unsqueeze(dim=1)

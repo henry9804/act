@@ -4,6 +4,14 @@ import pathlib
 DATA_DIR = '/data/act/data'
 # DATA_DIR = '/media/embodied_ai/SSD2TB/act/data'
 SIM_TASK_CONFIGS = {
+    'real_tocabi_pick_n_place':{
+        'dataset_dir': DATA_DIR + '/real_tocabi_pick_n_place',
+        'num_episodes': 200,
+        'episode_len': 1000,
+        'camera_names': ['stereo'],
+        'model_dof': 9
+    },
+
     'real_panda_pick_n_place':{
         'dataset_dir': DATA_DIR + '/real_panda_pick_n_place',
         'num_episodes': 100,
