@@ -38,10 +38,10 @@ class ACTPolicy(nn.Module):
             bce = (all_bce * ~is_pad.unsqueeze(-1)).mean()
             # total loss
             loss_dict = dict()
-            loss_dict['l1'] = l1
-            loss_dict['bce'] = bce
+            loss_dict['qpos'] = l1
+            loss_dict['hand'] = bce
             loss_dict['kl'] = total_kld[0]  # train with CVAE encoder
-            loss_dict['loss'] = loss_dict['l1'] + loss_dict['bce'] + loss_dict['kl'] * self.kl_weight  # train with CVAE encoder
+            loss_dict['loss'] = loss_dict['qpos'] + loss_dict['hand'] * 0.1 + loss_dict['kl'] * self.kl_weight  # train with CVAE encoder
             # loss_dict['loss'] = loss_dict['l1'] # train without CVAE encoder
             return loss_dict
         else: # inference time
@@ -90,7 +90,7 @@ class ACTTaskPolicy(nn.Module):
             loss_dict['rot'] = rot_l2
             loss_dict['hand'] = hand_bce
             loss_dict['kl'] = total_kld[0]
-            loss_dict['loss'] = loss_dict['pos'] + loss_dict['rot'] * 100 + loss_dict['hand'] + loss_dict['kl'] * self.kl_weight
+            loss_dict['loss'] = loss_dict['pos'] + loss_dict['rot'] * 100 + loss_dict['hand'] * 0.1 + loss_dict['kl'] * self.kl_weight
             return loss_dict
         else: # inference time
             # change 9D rotation to 6D GSO representation
