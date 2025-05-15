@@ -4,6 +4,14 @@ import pathlib
 DATA_DIR = '/data/act/data'
 # DATA_DIR = '/media/embodied_ai/SSD2TB/act/data'
 SIM_TASK_CONFIGS = {
+    'sim_panda_catch_ball':{
+        'dataset_dir': '/external/data/maniskill/PickBall',
+        'num_episodes': 200,
+        'episode_len': 500,
+        'camera_names': ['wrist'],
+        'model_dof': 7
+    },
+    
     'real_tocabi_pick_n_place':{
         'dataset_dir': DATA_DIR + '/real_tocabi_pick_n_place',
         'num_episodes': 200,

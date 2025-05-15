@@ -64,7 +64,7 @@ class TocabiAct:
         episode_len = task_config['episode_len']
         self.camera_names = task_config['camera_names']
         self.max_timesteps = int(episode_len * 1.5)
-        self.hand_open = 0
+        self.hand_open = False
         self.pelvis_TF = TF_mat()
         self.head_TF = TF_mat()
 
@@ -83,11 +83,13 @@ class TocabiAct:
 
         if self.policy_class == 'ACT':
             joint_sub = rospy.Subscriber("/tocabi/jointstates", JointState, self.joint_callback)
+            self.joint_target_pub = rospy.Publisher("/tocabi/act/joint_target", JointState, queue_size=1)
             self.state_dim = task_config['model_dof']
             policy_config['state_dim'] = self.state_dim
             self.policy = ACTPolicy(policy_config)
         elif self.policy_class == 'ACTTask':
             robot_poses_sub = rospy.Subscriber("/tocabi/robot_poses", PoseArray, self.robot_poses_callback)
+            self.pose_target_pub = rospy.Publisher("/tocabi/act/pose_target", PoseStamped, queue_size=1)
             self.state_dim = 10
             policy_config['state_dim'] = self.state_dim
             self.policy = ACTTaskPolicy(policy_config)
@@ -119,8 +121,6 @@ class TocabiAct:
         self.all_actions = None
         self.img_msgs = {}
 
-        self.joint_target_pub = rospy.Publisher("/tocabi/act/joint_target", JointState, queue_size=1)
-        self.pose_target_pub = rospy.Publisher("/tocabi/act/pose_target", PoseStamped, queue_size=1)
         self.hand_open_pub = rospy.Publisher("/tocabi_hand/on", Bool, queue_size=1)
 
         self.img_log = []
@@ -184,20 +184,14 @@ class TocabiAct:
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, 'state_action.svg'))
         plt.close()
-    
-    def pelvis_callback(self, pelvis_msg):
-        xyz = pelvis_msg.polygon.points[3]
-        rpy = pelvis_msg.polygon.points[4]
-        quat = Rotation.from_euler('xyz', [rpy.x, rpy.y, rpy.z], degrees=True).as_quat()
-        self.pelvis_TF = TF_mat.from_vectors([xyz.x, xyz.y, xyz.z], quat)
 
     def robot_poses_callback(self, robot_poses_msg):
-        rhand_TF = TF_mat.from_pose_msg(robot_poses_msg.poses[2])
+        self.pelvis_TF = TF_mat.from_pose_msg(robot_poses_msg.poses[0])
+        self.head_TF = TF_mat.from_pose_msg(robot_poses_msg.poses[2])
+        rhand_TF = TF_mat.from_pose_msg(robot_poses_msg.poses[3])
         ##########################################################
-        # rhand_TF = TF_mat.mul(self.pelvis_TF.inverse(), rhand_TF)  # rhand_TF in pelvis frame
-        ##########################################################
-        self.head_TF = TF_mat.from_pose_msg(robot_poses_msg.poses[1])
-        rhand_TF = TF_mat.mul(self.head_TF.inverse(), rhand_TF)  # rhand_TF in head frame
+        rhand_TF = TF_mat.mul(self.pelvis_TF.inverse(), rhand_TF)   # rhand_TF in pelvis frame
+        # rhand_TF = TF_mat.mul(self.head_TF.inverse(), rhand_TF)     # rhand_TF in head frame
         ##########################################################
         rhand_vec = rhand_TF.as_matrix()[:3,:].transpose().flatten()
         self.state = np.concatenate([rhand_vec, [self.hand_open]])
@@ -215,7 +209,7 @@ class TocabiAct:
             with torch.inference_mode():
                 self.state_log.append(self.state)
                 state = self.pre_process(self.state)
-                state = torch.from_numpy(state).float().cuda().unsqueeze(0)
+                state = torch.from_numpy(state).float().cuda().unsqueeze(0) # double -> float
                 all_cam_images = []
                 for cam_name in self.camera_names:
                     if cam_name.endswith('stereo'):
@@ -265,9 +259,8 @@ class TocabiAct:
                     print(self.t, ': ', target_pos, target_quat, target_hand)
                     rhand_action_TF = TF_mat.from_vectors(target_pos, target_quat)
                     ########################################################
-                    # rhand_action_TF = TF_mat.mul(self.pelvis_TF, rhand_action_TF)   # rhand_action_TF pelvis frame -> world frame
-                    ########################################################
-                    rhand_action_TF = TF_mat.mul(self.head_TF, rhand_action_TF)     # rhand_action_TF head frame -> world frame
+                    rhand_action_TF = TF_mat.mul(self.pelvis_TF, rhand_action_TF)   # rhand_action_TF pelvis frame -> world frame
+                    # rhand_action_TF = TF_mat.mul(self.head_TF, rhand_action_TF)     # rhand_action_TF head frame -> world frame
                     ########################################################
                     pose_target = PoseStamped()
                     pose_target.header.frame_id = 'world'
@@ -276,7 +269,7 @@ class TocabiAct:
                     self.pose_target_pub.publish(pose_target)
 
                 target_hand = target_hand > 0.5
-                if self.hand_open != int(target_hand):
+                if self.hand_open != target_hand:
                     self.hand_open = target_hand
                     hand_open_msg = Bool()
                     hand_open_msg.data = target_hand
@@ -323,7 +316,7 @@ class TocabiAct:
             self.state_log = []
             self.action_log = []
             self.inf_time_log = []
-            self.hand_open = 0
+            self.hand_open = False
             self.terminate = False
 
 def main(args):
@@ -334,7 +327,6 @@ def main(args):
 
     tocabi_act = TocabiAct(vars(args))
 
-    pelvis_sub = rospy.Subscriber("/tocabi/point", PolygonStamped, tocabi_act.pelvis_callback)
     img_l_sub = rospy.Subscriber("/cam_LEFT/image_raw/compressed", CompressedImage, tocabi_act.img_callback, callback_args='left', queue_size=1)
     img_r_sub = rospy.Subscriber("/cam_RIGHT/image_raw/compressed", CompressedImage, tocabi_act.img_callback, callback_args='right', queue_size=1)
     terminate_sub = rospy.Subscriber("/tocabi/act/terminate", Bool, tocabi_act.terminate_callback)
