@@ -127,9 +127,9 @@ def main(args):
         exit()
 
     if policy_class == 'ACTTask':
-        train_dataloader, val_dataloader, stats, _ = load_pose_data(dataset_dir, num_episodes, camera_names, args['chunk_size'], batch_size_train, batch_size_val)
+        train_dataloader, val_dataloader, stats, _ = load_pose_data(dataset_dir, num_episodes, camera_names, args['chunk_size'], batch_size_train, batch_size_val, img_aug=True)
     else:
-        train_dataloader, val_dataloader, stats, _ = load_joint_data(dataset_dir, num_episodes, camera_names, args['chunk_size'], batch_size_train, batch_size_val)
+        train_dataloader, val_dataloader, stats, _ = load_joint_data(dataset_dir, num_episodes, camera_names, args['chunk_size'], batch_size_train, batch_size_val, img_aug=True)
 
     # save dataset stats
     if not os.path.isdir(ckpt_dir):

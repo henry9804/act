@@ -3,21 +3,42 @@ import torch
 import os
 import h5py
 from torch.utils.data import TensorDataset, DataLoader
-from torchvision import transforms
+import torchvision.transforms.v2 as transforms
 
 import IPython
 e = IPython.embed
 
 active_joints = [25, 26, 27, 28, 29, 30, 31, 32, 33] # hardcode, TOCABI right arm + hand
 
+color_transform = transforms.ColorJitter(brightness=0.5,
+                           contrast=0.2,
+                           saturation=0.2,
+                           hue=0.1,
+                          )
+
+def rotate_n_crop_transform(img, size, angle=None, top=None):
+    if angle is None:
+        angle = np.random.random() * 10 - 5
+    if top is None:
+        h, w = img.shape
+        top_h = np.random.randint(0, 120)
+        top_w = np.random.randint(0, 160)
+        top = [top_h, top_w]
+    
+    img = transforms.functional.rotate(img, angle)
+    img = transforms.functional.crop(img, *top, *size)
+
+    return img
+
 class EpisodicJointDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, chunk_size, norm_stats):
+    def __init__(self, episode_ids, dataset_dir, camera_names, chunk_size, norm_stats, img_aug=False):
         super(EpisodicJointDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
         self.chunk_size = chunk_size
         self.norm_stats = norm_stats
+        self.img_aug = img_aug
         self.is_sim = None
         self.__getitem__(0) # initialize self.is_sim
 
@@ -43,9 +64,27 @@ class EpisodicJointDataset(torch.utils.data.Dataset):
                 if cam_name.endswith('stereo'):
                     left_img = root[f'/observations/images/{cam_name[:-6]}left'][start_ts]
                     right_img = root[f'/observations/images/{cam_name[:-6]}right'][start_ts]
+                    left_img = transforms.functional.to_pil_image(left_img)
+                    right_img = transforms.functional.to_pil_image(right_img)
+                    if self.img_aug:
+                        angle = np.random.random() * 10 - 5
+                        top_h = np.random.randint(0, 120)
+                        top_w = np.random.randint(0, 160)
+                        left_img = color_transform(left_img)
+                        left_img = rotate_n_crop_transform(left_img, [480, 640], angle, (top_h, top_w))
+                        right_img = color_transform(right_img)
+                        right_img = rotate_n_crop_transform(right_img, [480, 640], angle, (top_h, top_w))
+                    left_img = transforms.functional.resize(left_img, [480, 640])
+                    right_img = transforms.functional.resize(right_img, [480, 640])
                     image_dict[cam_name] = np.concatenate([left_img, right_img], axis=1) # width dimension
                 else:
-                    image_dict[cam_name] = root[f'/observations/images/{cam_name}'][start_ts]
+                    img = root[f'/observations/images/{cam_name}'][start_ts]
+                    img = transforms.functional.to_pil_image(img)
+                    if self.img_aug:
+                        img = self.color_transform(img)
+                        img = rotate_n_crop_transform(img)
+                    img = transforms.functional.resize(img, [480, 640])
+                    image_dict[cam_name] = img
             # get all actions after and including start_ts
             action = root['/action'][start_ts:min(start_ts+self.chunk_size, episode_len), active_joints]
             action_len, action_dof = action.shape
@@ -70,7 +109,6 @@ class EpisodicJointDataset(torch.utils.data.Dataset):
 
         # channel last
         image_data = torch.einsum('k h w c -> k c h w', image_data)
-        image_data = transforms.Resize((480, 1280))(image_data) # hardcode for TOCABI stereo data
 
         # normalize image and change dtype to float
         image_data = image_data / 255.0
@@ -115,7 +153,7 @@ def get_joint_norm_stats(dataset_dir, num_episodes):
     return stats
 
 
-def load_joint_data(dataset_dir, num_episodes, camera_names, chunk_size, batch_size_train, batch_size_val):
+def load_joint_data(dataset_dir, num_episodes, camera_names, chunk_size, batch_size_train, batch_size_val, img_aug=False):
     print(f'\nData from: {dataset_dir}\n')
     # obtain train test split
     train_ratio = 0.8
@@ -127,8 +165,8 @@ def load_joint_data(dataset_dir, num_episodes, camera_names, chunk_size, batch_s
     norm_stats = get_joint_norm_stats(dataset_dir, num_episodes)
 
     # construct dataset and dataloader
-    train_dataset = EpisodicJointDataset(train_indices, dataset_dir, camera_names, chunk_size, norm_stats)
-    val_dataset = EpisodicJointDataset(val_indices, dataset_dir, camera_names, chunk_size, norm_stats)
+    train_dataset = EpisodicJointDataset(train_indices, dataset_dir, camera_names, chunk_size, norm_stats, img_aug)
+    val_dataset = EpisodicJointDataset(val_indices, dataset_dir, camera_names, chunk_size, norm_stats, img_aug)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
 
@@ -136,13 +174,14 @@ def load_joint_data(dataset_dir, num_episodes, camera_names, chunk_size, batch_s
 
 
 class EpisodicPoseDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, chunk_size, norm_stats):
+    def __init__(self, episode_ids, dataset_dir, camera_names, chunk_size, norm_stats, img_aug):
         super(EpisodicPoseDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
         self.chunk_size = chunk_size
         self.norm_stats = norm_stats
+        self.img_aug = img_aug
         self.is_sim = None
         self.__getitem__(0) # initialize self.is_sim
 
@@ -156,23 +195,41 @@ class EpisodicPoseDataset(torch.utils.data.Dataset):
         dataset_path = os.path.join(self.dataset_dir, f'episode_{episode_id}.hdf5')
         with h5py.File(dataset_path, 'r') as root:
             is_sim = root.attrs['sim']
-            episode_len = root['/observations/ee_pose_rel'].shape[0] - 120  # hardcode for TOCABI data, do not train moving to ready pose
+            episode_len = root['/observations/ee_pose_global'].shape[0] - 120  # hardcode for TOCABI data, do not train moving to ready pose
             if sample_full_episode:
                 start_ts = 0
             else:
                 start_ts = np.random.choice(episode_len)
             # get observation at start_ts only
-            qpos = root['/observations/ee_pose_rel'][start_ts]
+            qpos = root['/observations/ee_pose_global'][start_ts]
             image_dict = dict()
             for cam_name in self.camera_names:
                 if cam_name.endswith('stereo'):
                     left_img = root[f'/observations/images/{cam_name[:-6]}left'][start_ts]
                     right_img = root[f'/observations/images/{cam_name[:-6]}right'][start_ts]
+                    left_img = transforms.functional.to_pil_image(left_img)
+                    right_img = transforms.functional.to_pil_image(right_img)
+                    if self.img_aug:
+                        angle = np.random.random() * 10 - 5
+                        top_h = np.random.randint(0, 120)
+                        top_w = np.random.randint(0, 160)
+                        left_img = color_transform(left_img)
+                        left_img = rotate_n_crop_transform(left_img, [480, 640], angle, (top_h, top_w))
+                        right_img = color_transform(right_img)
+                        right_img = rotate_n_crop_transform(right_img, [480, 640], angle, (top_h, top_w))
+                    left_img = transforms.functional.resize(left_img, [480, 640])
+                    right_img = transforms.functional.resize(right_img, [480, 640])
                     image_dict[cam_name] = np.concatenate([left_img, right_img], axis=1) # width dimension
                 else:
-                    image_dict[cam_name] = root[f'/observations/images/{cam_name}'][start_ts]
+                    img = root[f'/observations/images/{cam_name}'][start_ts]
+                    img = transforms.functional.to_pil_image(img)
+                    if self.img_aug:
+                        img = self.color_transform(img)
+                        img = rotate_n_crop_transform(img)
+                    img = transforms.functional.resize(img, [480, 640])
+                    image_dict[cam_name] = img
             # get all actions after and including start_ts
-            action = root['/ee_action_rel'][start_ts:min(start_ts+self.chunk_size, episode_len)]
+            action = root['/ee_action_global'][start_ts:min(start_ts+self.chunk_size, episode_len)]
             action_len, action_dof = action.shape
 
         self.is_sim = is_sim
@@ -195,7 +252,6 @@ class EpisodicPoseDataset(torch.utils.data.Dataset):
 
         # channel last
         image_data = torch.einsum('k h w c -> k c h w', image_data)
-        image_data = transforms.Resize((480, 1280))(image_data) # hardcode for TOCABI stereo data
 
         # normalize image and change dtype to float
         image_data = image_data / 255.0
@@ -211,8 +267,8 @@ def get_pose_norm_stats(dataset_dir, num_episodes):
     for episode_idx in range(num_episodes):
         dataset_path = os.path.join(dataset_dir, f'episode_{episode_idx}.hdf5')
         with h5py.File(dataset_path, 'r') as root:
-            qpos = root['/observations/ee_pose_rel'][()]
-            action = root['/ee_action_rel'][()]
+            qpos = root['/observations/ee_pose_global'][()]
+            action = root['/ee_action_global'][()]
         all_qpos_data.append(torch.from_numpy(qpos[:,9:12])) # do not normalize 9D roation & binary gripper state
         all_action_data.append(torch.from_numpy(action[:,9:12]))
     all_qpos_data = torch.cat(all_qpos_data)
@@ -240,7 +296,7 @@ def get_pose_norm_stats(dataset_dir, num_episodes):
     return stats
 
 
-def load_pose_data(dataset_dir, num_episodes, camera_names, chunk_size, batch_size_train, batch_size_val):
+def load_pose_data(dataset_dir, num_episodes, camera_names, chunk_size, batch_size_train, batch_size_val, img_aug=False):
     print(f'\nData from: {dataset_dir}\n')
     # obtain train test split
     train_ratio = 0.8
@@ -252,8 +308,8 @@ def load_pose_data(dataset_dir, num_episodes, camera_names, chunk_size, batch_si
     norm_stats = get_pose_norm_stats(dataset_dir, num_episodes)
 
     # construct dataset and dataloader
-    train_dataset = EpisodicPoseDataset(train_indices, dataset_dir, camera_names, chunk_size, norm_stats)
-    val_dataset = EpisodicPoseDataset(val_indices, dataset_dir, camera_names, chunk_size, norm_stats)
+    train_dataset = EpisodicPoseDataset(train_indices, dataset_dir, camera_names, chunk_size, norm_stats, img_aug)
+    val_dataset = EpisodicPoseDataset(val_indices, dataset_dir, camera_names, chunk_size, norm_stats, img_aug)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
 
