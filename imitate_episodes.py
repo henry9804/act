@@ -484,7 +484,7 @@ def train_bc(train_dataloader, val_dataloader, config):
         best_ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{best_epoch}_seed_{seed}.ckpt')
         torch.save(best_state_dict, best_ckpt_path)
 
-    print(f'\Training finished:')
+    print(f'\nTraining finished:')
     print(f'  Val loss:   {epoch_val_loss:.5f}')
     print(val_summary_string)
     print(f'  Train loss: {epoch_train_loss:.5f}')
@@ -514,6 +514,7 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
         plt.legend()
         plt.title(key)
         plt.savefig(plot_path)
+        plt.close()
     # print(f'Saved plots to {ckpt_dir}')
 
 '''
