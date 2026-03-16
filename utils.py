@@ -4,6 +4,7 @@ import os
 import h5py
 from torch.utils.data import TensorDataset, DataLoader
 import torchvision.transforms.v2 as transforms
+from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 
 import IPython
 e = IPython.embed
@@ -15,6 +16,7 @@ color_transform = transforms.ColorJitter(brightness=0.5,
                            saturation=0.2,
                            hue=0.1,
                           )
+random_crop = transforms.RandomCrop(size=(84,84))
 
 def rotate_n_crop_transform(img, size, angle=None, top=None):
     if angle is None:
@@ -29,6 +31,112 @@ def rotate_n_crop_transform(img, size, angle=None, top=None):
     img = transforms.functional.crop(img, *top, *size)
 
     return img
+
+
+class EpisodicLeRobotDataset(torch.utils.data.Dataset):
+    def __init__(self, episode_ids, lerobot_dataset: LeRobotDataset, camera_names, n_obs_steps, state_key, action_key, norm_stats, img_aug=False):
+        super(EpisodicLeRobotDataset).__init__()
+        self.episode_ids = episode_ids
+        self.dataset = lerobot_dataset
+        self.episodes = lerobot_dataset.meta.episodes
+        self.stats = lerobot_dataset.meta.stats
+        self.camera_names = camera_names
+        self.n_obs_steps = n_obs_steps
+        self.state_key = state_key
+        self.action_key = action_key
+        self.norm_stats = norm_stats
+    
+    def __len__(self):
+        return len(self.episode_ids)
+    
+    def __getitem__(self, index):
+        episode_id = self.episode_ids[index]
+        frame_id = np.random.randint(self.episodes['dataset_from_index'][episode_id], self.episodes['dataset_to_index'][episode_id])
+        data = self.dataset[frame_id]
+
+        image_dict = dict()
+        for cam_name in self.camera_names:
+            if cam_name == "":  # pusht
+                img = data[f'observation.image']
+                # img = transforms.functional.resize(img, [480, 640])
+                img = random_crop(img)
+                image_dict[cam_name] = img
+            elif cam_name.endswith('stereo'):
+                left_img = data[f'observation.images.{cam_name[:-6]}left']
+                right_img = data[f'observation.images.{cam_name[:-6]}right']
+                left_img = transforms.functional.resize(left_img, [480, 640])
+                right_img = transforms.functional.resize(right_img, [480, 640])
+                image_dict[cam_name] = torch.cat([left_img, right_img], dim=-1) # width dimension
+            else:
+                img = data[f'observation.images.{cam_name}']
+                img = transforms.functional.resize(img, [480, 640])
+                image_dict[cam_name] = img
+        # new axis for different cameras
+        all_cam_images = []
+        for cam_name in self.camera_names:
+            all_cam_images.append(image_dict[cam_name])
+        if self.n_obs_steps == 1:
+            image_data = torch.stack(all_cam_images, axis=1)
+        else:
+            image_data = torch.cat(all_cam_images, dim=1)
+
+        # normalization (image is already normalized to 0-1)
+        qpos_data = data[self.state_key]
+        qpos_data = (qpos_data - self.norm_stats["qpos_mean"]) / self.norm_stats["qpos_std"]
+        qpos_data = torch.flatten(qpos_data)  # handle n_obs_steps
+        action_data = data[self.action_key]
+        action_data = (action_data - self.norm_stats["action_mean"]) / self.norm_stats["action_std"]
+
+        is_pad = data['action_is_pad']
+
+        return image_data, qpos_data, action_data, is_pad
+
+def load_lerobot_data(config: dict, chunk_size, batch_size_train, batch_size_val):
+    dataset_id = config['dataset_id']
+    camera_names = config['camera_names']
+    num_episodes = config['num_episodes']
+    n_obs_steps = config.get('n_obs_steps', 1)
+    state_key = config.get('state_key', 'observation.state')
+    action_key = config.get('action_key', 'action')
+    dt = 1 / config.get('fps', 30)
+
+    # obtain train test split
+    train_ratio = 0.8
+    shuffled_indices = np.random.permutation(num_episodes)
+    train_indices = shuffled_indices[:int(train_ratio * num_episodes)]
+    val_indices = shuffled_indices[int(train_ratio * num_episodes):]
+
+    # make delta_timestamps
+    ds_meta = LeRobotDatasetMetadata(dataset_id)
+    delta_timestamps = {
+        state_key: [dt*i for i in range(1 - n_obs_steps, 1)],
+        action_key: [dt*i for i in range(chunk_size)]
+    }
+    for cname in camera_names:  # check for camera name availability
+        if cname == "":
+            assert f'observation.image' in ds_meta.camera_keys, f'image is not included in {dataset_id} dataset'
+            delta_timestamps['observation.image'] = [dt*i for i in range(1 - n_obs_steps, 1)]
+        else:
+            assert f'observation.images.{cname}' in ds_meta.camera_keys, f'{cname} image is not included in {dataset_id} dataset'
+            delta_timestamps[f'observation.images.{cname}'] = [dt*i for i in range(1 - n_obs_steps, 1)]
+    
+    # obtain normalization stats for qpos and action
+    norm_stats = {"action_mean": ds_meta.stats[action_key]['mean'].astype(np.float32), 
+                  "action_std": ds_meta.stats[action_key]['std'].astype(np.float32),
+                  "qpos_mean": ds_meta.stats[state_key]['mean'].astype(np.float32), 
+                  "qpos_std": ds_meta.stats[state_key]['std'].astype(np.float32)}
+    
+    # construct dataset and dataloader
+    lerobot_dataset = LeRobotDataset(dataset_id, delta_timestamps=delta_timestamps)
+    train_dataset = EpisodicLeRobotDataset(train_indices, lerobot_dataset, camera_names, n_obs_steps, state_key, action_key, norm_stats)
+    val_dataset = EpisodicLeRobotDataset(val_indices, lerobot_dataset, camera_names, n_obs_steps, state_key, action_key, norm_stats)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=0)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=0)
+
+    norm_stats["example_qpos"] = lerobot_dataset[0][state_key]
+
+    return train_dataloader, val_dataloader, norm_stats, 'sim' in dataset_id
+
 
 class EpisodicJointDataset(torch.utils.data.Dataset):
     def __init__(self, episode_ids, dataset_dir, camera_names, chunk_size, norm_stats, img_aug=False):

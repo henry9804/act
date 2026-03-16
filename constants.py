@@ -4,6 +4,17 @@ import pathlib
 DATA_DIR = '/data/act/data'
 # DATA_DIR = '/media/embodied_ai/SSD2TB/act/data'
 SIM_TASK_CONFIGS = {
+    'sim_lerobot_pusht':{
+        'dataset_id': 'lerobot/pusht',
+        'num_episodes': 206,
+        'episode_len': 250,
+        'camera_names': [''],
+        'model_dof': 2,
+        'n_obs_steps': 2,
+        'fps': 10,
+        'gripper_is_binary': False
+    },
+
     'sim_panda_catch_ball':{
         'dataset_dir': '/external/data/maniskill/PickBall',
         'num_episodes': 200,

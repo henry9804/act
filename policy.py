@@ -17,6 +17,7 @@ class ACTPolicy(nn.Module):
         self.optimizer = optimizer
         self.kl_weight = args_override['kl_weight']
         print(f'KL Weight {self.kl_weight}')
+        self.gripper_is_binary = args_override['gripper_is_binary']
 
     def __call__(self, qpos, image, actions=None, is_pad=None):
         env_state = None
@@ -30,19 +31,30 @@ class ACTPolicy(nn.Module):
             a_hat, is_pad_hat, (mu, logvar) = self.model(qpos, image, env_state, actions, is_pad)
             # kl divergence loss
             total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar) # train with CVAE encoder
-            # position l1 loss
-            all_l1 = F.l1_loss(actions[:,:,:-1], a_hat[:,:,:-1], reduction='none')
-            l1 = (all_l1 * ~is_pad.unsqueeze(-1)).mean()
-            # gripper state binary cross entropy loss
-            all_bce = F.binary_cross_entropy_with_logits(a_hat[:,:,-1:], actions[:,:,-1:], reduction='none')
-            bce = (all_bce * ~is_pad.unsqueeze(-1)).mean()
-            # total loss
-            loss_dict = dict()
-            loss_dict['qpos'] = l1
-            loss_dict['hand'] = bce
-            loss_dict['kl'] = total_kld[0]  # train with CVAE encoder
-            loss_dict['loss'] = loss_dict['qpos'] + loss_dict['hand'] * 0.1 + loss_dict['kl'] * self.kl_weight  # train with CVAE encoder
-            # loss_dict['loss'] = loss_dict['l1'] # train without CVAE encoder
+            if self.gripper_is_binary:
+                # position l1 loss
+                all_l1 = F.l1_loss(actions[:,:,:-1], a_hat[:,:,:-1], reduction='none')
+                l1 = (all_l1 * ~is_pad.unsqueeze(-1)).mean()
+                # gripper state binary cross entropy loss
+                all_bce = F.binary_cross_entropy_with_logits(a_hat[:,:,-1:], actions[:,:,-1:], reduction='none')
+                bce = (all_bce * ~is_pad.unsqueeze(-1)).mean()
+                # total loss
+                loss_dict = dict()
+                loss_dict['qpos'] = l1
+                loss_dict['hand'] = bce
+                loss_dict['kl'] = total_kld[0]  # train with CVAE encoder
+                loss_dict['loss'] = loss_dict['qpos'] + loss_dict['hand'] * 0.1 + loss_dict['kl'] * self.kl_weight  # train with CVAE encoder
+                # loss_dict['loss'] = loss_dict['qpos'] + loss_dict['hand'] * 0.1 # train without CVAE encoder
+            else:
+                # position l1 loss
+                all_l1 = F.l1_loss(actions, a_hat, reduction='none')
+                l1 = (all_l1 * ~is_pad.unsqueeze(-1)).mean()
+                # total loss
+                loss_dict = dict()
+                loss_dict['l1'] = l1
+                loss_dict['kl'] = total_kld[0]  # train with CVAE encoder
+                loss_dict['loss'] = loss_dict['l1']+ loss_dict['kl'] * self.kl_weight  # train with CVAE encoder
+                # loss_dict['loss'] = loss_dict['l1'] # train without CVAE encoder
             return loss_dict
         else: # inference time
             a_hat, _, (_, _) = self.model(qpos, image, env_state) # no action, sample from prior
