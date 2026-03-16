@@ -65,25 +65,37 @@ class ACTTaskPolicy(nn.Module):
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
         image = normalize(image)
+        num_eef = pose.shape[1] // 13
         if actions is not None: # training time
             # change 9D rotation to 6D GSO representation
-            pose_6D_rot = torch.cat([pose[:,:6], pose[:,9:]], dim=-1)
-            actions_6D_rot = torch.cat([actions[:,:,:6], actions[:,:,9:]], dim=-1)
+            pose_6D_rot = []
+            actions_6D_rot = []
+            for i in range(num_eef):
+                pose_6D_rot.append(pose[:,i*13:i*13+6])
+                pose_6D_rot.append(pose[:,i*13+9:i*13+13])
+                actions_6D_rot.append(actions[:,:,i*13:i*13+6])
+                actions_6D_rot.append(actions[:,:,i*13+9:i*13+13])
+            pose_6D_rot = torch.cat(pose_6D_rot, dim=-1)
+            actions_6D_rot = torch.cat(actions_6D_rot, dim=-1)
             # model output
             a_hat, is_pad_hat, (mu, logvar) = self.model(pose_6D_rot, image, env_state, actions_6D_rot, is_pad)
             # kl divergence loss
             total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar)
-            # position l1 loss
-            pos_all_l1 = F.l1_loss(a_hat[:,:,6:9], actions[:,:,9:12], reduction='none')
-            pos_l1 = (pos_all_l1 * ~is_pad.unsqueeze(-1)).mean()
-            # 6D GSO rotation l2 loss
-            batch, chunk, _ = a_hat.shape
-            R = special_gramschmidt(a_hat[:,:,:6].reshape(batch, chunk, 2, 3).transpose(-1,-2))
-            rot_all_l2 = F.mse_loss(R.transpose(-1,-2).flatten(-2,-1), actions[:,:,:9], reduction='none')
-            rot_l2 = (rot_all_l2 * ~is_pad.unsqueeze(-1)).mean()
-            # hand state binary cross entropy loss
-            hand_all_bce = F.binary_cross_entropy_with_logits(a_hat[:,:,9:], actions[:,:,12:], reduction='none')
-            hand_bce = (hand_all_bce * ~is_pad.unsqueeze(-1)).mean()
+            pos_l1 = 0
+            rot_l2 = 0
+            hand_bce = 0
+            for i in range(num_eef):
+                # position l1 loss
+                pos_all_l1 = F.l1_loss(a_hat[:,:,i*10+6:i*10+9], actions[:,:,i*13+9:i*13+12], reduction='none')
+                pos_l1 += (pos_all_l1 * ~is_pad.unsqueeze(-1)).mean()
+                # 6D GSO rotation l2 loss
+                batch, chunk, _ = a_hat.shape
+                R = special_gramschmidt(a_hat[:,:,i*10:i*10+6].reshape(batch, chunk, 2, 3).transpose(-1,-2))
+                rot_all_l2 = F.mse_loss(R.transpose(-1,-2).flatten(-2,-1), actions[:,:,i*13:i*13+9], reduction='none')
+                rot_l2 += (rot_all_l2 * ~is_pad.unsqueeze(-1)).mean()
+                # hand state binary cross entropy loss
+                hand_all_bce = F.binary_cross_entropy_with_logits(a_hat[:,:,i*10+9:i*10+10], actions[:,:,i*13+12:i*13+13], reduction='none')
+                hand_bce += (hand_all_bce * ~is_pad.unsqueeze(-1)).mean()
             # total loss
             loss_dict = dict()
             loss_dict['pos'] = pos_l1
@@ -94,7 +106,11 @@ class ACTTaskPolicy(nn.Module):
             return loss_dict
         else: # inference time
             # change 9D rotation to 6D GSO representation
-            pose_6D_rot = torch.cat([pose[:,:6], pose[:,9:]], dim=-1)
+            pose_6D_rot = []
+            for i in range(num_eef):
+                pose_6D_rot.append(pose[:,i*13:i*13+6])
+                pose_6D_rot.append(pose[:,i*13+9:i*13+13])
+            pose_6D_rot = torch.cat(pose_6D_rot, dim=-1)
             a_hat, _, (_, _) = self.model(pose_6D_rot, image, env_state) # no action, sample from prior
             return a_hat
             '''

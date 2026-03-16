@@ -269,25 +269,33 @@ def get_pose_norm_stats(dataset_dir, num_episodes):
         with h5py.File(dataset_path, 'r') as root:
             qpos = root['/observations/ee_pose_global'][()]
             action = root['/ee_action_global'][()]
-        all_qpos_data.append(torch.from_numpy(qpos[:,9:12])) # do not normalize 9D roation & binary gripper state
-        all_action_data.append(torch.from_numpy(action[:,9:12]))
+        all_qpos_data.append(torch.from_numpy(qpos).float())
+        all_action_data.append(torch.from_numpy(action).float())
     all_qpos_data = torch.cat(all_qpos_data)
     all_action_data = torch.cat(all_action_data)
     all_action_data = all_action_data
 
     # normalize action data
-    action_mean = np.zeros(13, dtype=np.float32)
-    action_mean[9:12] = all_action_data.mean(dim=0).numpy()
-    action_std = np.ones(13, dtype=np.float32)
-    action_std[9:12] = all_action_data.std(dim=0).numpy()
+    action_mean = all_action_data.mean(dim=0).numpy()
+    action_std = all_action_data.std(dim=0).numpy()
     action_std = action_std.clip(1e-2, np.inf) # clipping
 
     # normalize qpos data
-    qpos_mean = np.zeros(13, dtype=np.float32)
-    qpos_mean[9:12] = all_qpos_data.mean(dim=0).numpy()
-    qpos_std = np.ones(13, dtype=np.float32)
-    qpos_std[9:12] = all_qpos_data.std(dim=0).numpy()
+    qpos_mean = all_qpos_data.mean(dim=0).numpy()
+    qpos_std = all_qpos_data.std(dim=0).numpy()
     qpos_std = qpos_std.clip(1e-2, np.inf) # clipping
+
+    # do not normalize 9D roation & binary gripper state
+    num_eef = all_qpos_data.shape[1] // 13
+    for i in range(num_eef):
+        action_mean[i*13:i*13+9] = 0.0
+        action_mean[i*13+12:i*13+13] = 0.0
+        qpos_mean[i*13:i*13+9] = 0.0
+        qpos_mean[i*13+12:i*13+13] = 0.0
+        action_std[i*13:i*13+9] = 1.0
+        action_std[i*13+12:i*13+13] = 1.0
+        qpos_std[i*13:i*13+9] = 1.0
+        qpos_std[i*13+12:i*13+13] = 1.0
 
     stats = {"action_mean": action_mean, "action_std": action_std,
              "qpos_mean": qpos_mean, "qpos_std": qpos_std,
