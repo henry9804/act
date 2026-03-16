@@ -81,7 +81,7 @@ class EpisodicJointDataset(torch.utils.data.Dataset):
                     img = root[f'/observations/images/{cam_name}'][start_ts]
                     img = transforms.functional.to_pil_image(img)
                     if self.img_aug:
-                        img = self.color_transform(img)
+                        img = color_transform(img)
                         img = rotate_n_crop_transform(img)
                     img = transforms.functional.resize(img, [480, 640])
                     image_dict[cam_name] = img
@@ -224,7 +224,7 @@ class EpisodicPoseDataset(torch.utils.data.Dataset):
                     img = root[f'/observations/images/{cam_name}'][start_ts]
                     img = transforms.functional.to_pil_image(img)
                     if self.img_aug:
-                        img = self.color_transform(img)
+                        img = color_transform(img)
                         img = rotate_n_crop_transform(img)
                     img = transforms.functional.resize(img, [480, 640])
                     image_dict[cam_name] = img
