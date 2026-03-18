@@ -21,7 +21,7 @@ from constants import SIM_TASK_CONFIGS
 from transform import TF_mat
 from copy import deepcopy
 
-log_dir = '/home/lyh/projects/embodied_ai/act/logs'
+log_dir = '/media/dyros/SSD2TB/act/logs'
 FPS = 15
 JOINT_NAMES = ["L_HipYaw_Joint", "L_HipRoll_Joint", "L_HipPitch_Joint",
                "L_Knee_Joint", "L_AnklePitch_Joint", "L_AnkleRoll_Joint",
@@ -32,11 +32,13 @@ JOINT_NAMES = ["L_HipYaw_Joint", "L_HipRoll_Joint", "L_HipPitch_Joint",
                "L_Elbow_Joint", "L_Forearm_Joint", "L_Wrist1_Joint", "L_Wrist2_Joint",
                "Neck_Joint", "Head_Joint",
                "R_Shoulder1_Joint", "R_Shoulder2_Joint", "R_Shoulder3_Joint", "R_Armlink_Joint",
-               "R_Elbow_Joint", "R_Forearm_Joint", "R_Wrist1_Joint", "R_Wrist2_Joint"]
+               "R_Elbow_Joint", "R_Forearm_Joint", "R_Wrist1_Joint", "R_Wrist2_Joint",
+               "Hand"]
 STATE_NAMES = ["R_11", "R_21", "R_31", 
                "R_12", "R_22", "R_32", 
                "R_13", "R_23", "R_33",
-               "X", "Y", "Z"]
+               "X", "Y", "Z", 
+               "Hand"]
 joint_index = [25, 26, 27, 28, 29, 30, 31, 32]
 
 def im_msg_2_cv_img(img_msg, rotate = False, dir=None):
@@ -92,8 +94,10 @@ class TocabiAct:
             self.policy = ACTPolicy(policy_config)
         elif self.policy_class == 'ACTTask':
             robot_poses_sub = rospy.Subscriber("/tocabi/robot_poses", PoseArray, self.robot_poses_callback)
-            self.pose_target_pub = rospy.Publisher("/tocabi/act/pose_target", PoseStamped, queue_size=1)
-            self.state_dim = 10
+            # desired_robot_poses_sub = rospy.Subscriber("/tocabi/desired_robot_poses", PoseArray, self.desired_robot_poses_callback)
+            self.lhand_pose_target_pub = rospy.Publisher("/tocabi/act/lhand_pose_target", PoseStamped, queue_size=1)
+            self.rhand_pose_target_pub = rospy.Publisher("/tocabi/act/rhand_pose_target", PoseStamped, queue_size=1)
+            self.state_dim = 20
             policy_config['state_dim'] = self.state_dim
             self.policy = ACTTaskPolicy(policy_config)
         else:
@@ -133,20 +137,37 @@ class TocabiAct:
 
     def post_process_task(self, raw_action):
         raw_action = raw_action.squeeze()
+        # lhand
         # unnormalize position action
-        pos = raw_action[6:9].cpu().numpy()
-        pos = pos * self.stats['action_std'][9:12] + self.stats['action_mean'][9:12]
+        lhand_pos = raw_action[6:9].cpu().numpy()
+        lhand_pos = lhand_pos * self.stats['action_std'][9:12] + self.stats['action_mean'][9:12]
         # 6D GSO representation to quternion
-        R = special_gramschmidt(raw_action[:6].reshape(2, 3).transpose(0,1))
-        R = R.cpu().numpy()
-        quat = Rotation.from_matrix(R).as_quat()
+        lhand_R = special_gramschmidt(raw_action[0:6].reshape(2, 3).transpose(0,1))
+        lhand_R = lhand_R.cpu().numpy()
+        lhand_quat = Rotation.from_matrix(lhand_R).as_quat()
         # apply sigmoid to hand state action
-        hand = F.sigmoid(raw_action[9])
-        hand = hand.cpu().numpy()
+        lhand = F.sigmoid(raw_action[9])
+        lhand = lhand.cpu().numpy()
+        print('\t', lhand_pos, lhand_quat, lhand)
+        # rhand
+        # unnormalize position action
+        rhand_pos = raw_action[16:19].cpu().numpy()
+        rhand_pos = rhand_pos * self.stats['action_std'][22:25] + self.stats['action_mean'][22:25]
+        # 6D GSO representation to quternion
+        rhand_R = special_gramschmidt(raw_action[10:16].reshape(2, 3).transpose(0,1))
+        rhand_R = rhand_R.cpu().numpy()
+        rhand_quat = Rotation.from_matrix(rhand_R).as_quat()
+        # apply sigmoid to hand state action
+        rhand = F.sigmoid(raw_action[19])
+        rhand = rhand.cpu().numpy()
+        print('\t', rhand_pos, rhand_quat, rhand)
 
-        self.action_log.append([*R.transpose().flatten(), *pos, hand])
+        self.action_log.append([*lhand_R.transpose().flatten(), *lhand_pos, lhand, *rhand_R.transpose().flatten(), *rhand_pos, rhand])
 
-        return pos, quat, hand
+        lhand_TF = TF_mat.from_vectors(lhand_pos, lhand_quat)
+        rhand_TF = TF_mat.from_vectors(rhand_pos, rhand_quat)
+
+        return lhand_TF, lhand, rhand_TF, rhand
 
     def post_process_joint(self, raw_action):
         raw_action = raw_action.squeeze()
@@ -171,19 +192,16 @@ class TocabiAct:
         # plot state and action
         state = np.array(self.state_log)
         action = np.array(self.action_log)
-        state_dim = state.shape[1]
-        fig, axes = plt.subplots(state_dim, 1, figsize=(state_dim, 2 * state_dim))
-        for i in range(state_dim-1):
-            axes[i].plot(state[:, i])
-            axes[i].plot(action[:, i])
-            if self.policy_class == 'ACT':
-                axes[i].set_title(JOINT_NAMES[joint_index[i]])
-            elif self.policy_class == 'ACTTask':
-                axes[i].set_title(STATE_NAMES[i])
-        axes[-1].plot(state[:, -1], label='state')
-        axes[-1].plot(action[:, -1], label='action')
-        axes[-1].legend()
-        axes[-1].set_title('Hand_State')
+        state_dim = 26
+        fig, axes = plt.subplots(13, 2, figsize=(25, 25))
+        ee_name = ["L", "R"]
+        for k in range(state_dim):
+            i = k % 13
+            j = k // 13
+            axes[i][j].plot(state[:, k], label='state')
+            axes[i][j].plot(action[:, k], label='action')
+            axes[i][j].set_title(f"{ee_name[j]}_{STATE_NAMES[i]}")
+        axes[0][0].legend()
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, 'state_action.svg'))
         plt.close()
@@ -195,10 +213,16 @@ class TocabiAct:
         # self.base_TF = self.pelvis_TF   # ee_TF in pelvis frame
         self.base_TF = self.head_TF     # ee_TF in head frame
         ##########################################################
+        lhand_TF = TF_mat.from_pose_msg(robot_poses_msg.poses[1])
+        lhand_TF = TF_mat.mul(self.base_TF.inverse(), lhand_TF)     
+        lhand_vec = lhand_TF.as_matrix()[:3,:].transpose().flatten()
         rhand_TF = TF_mat.from_pose_msg(robot_poses_msg.poses[3])
-        rhand_TF = TF_mat.mul(self.base_TF.inverse(), rhand_TF)###
+        rhand_TF = TF_mat.mul(self.base_TF.inverse(), rhand_TF)
         rhand_vec = rhand_TF.as_matrix()[:3,:].transpose().flatten()
-        self.state = np.concatenate([rhand_vec, [self.hand_open]])
+        self.state = np.concatenate([lhand_vec, [self.hand_open], rhand_vec, [self.hand_open]])
+
+    # def desired_robot_poses_callback(self, robot_poses_msg):
+    #     self.head_TF = TF_mat.from_pose_msg(robot_poses_msg.poses[1])
 
     def joint_callback(self, joint_msg):
         joint_state = np.array([joint_msg.position[j] for j in joint_index])
@@ -235,7 +259,7 @@ class TocabiAct:
                     self.all_actions = self.policy(state, curr_image)
                 if self.temporal_agg:
                     self.all_time_actions[[self.t], self.t:self.t+self.num_queries] = self.all_actions
-                    actions_for_curr_step = self.all_time_actions[:, self.t+24]
+                    actions_for_curr_step = self.all_time_actions[:, self.t+19]
                     actions_populated = torch.all(actions_for_curr_step != 0, axis=1)
                     actions_for_curr_step = actions_for_curr_step[actions_populated]
                     k = 0.1
@@ -253,28 +277,33 @@ class TocabiAct:
                     print(self.t, ': ', target_joint, target_hand)
                     joint_target = JointState()
                     joint_target.header.stamp = rospy.Time.now()
-                    joint_target.name = [JOINT_NAMES[j] for j in joint_index]
+                    joint_target.name = [JOINT_NAMES[j] for j in joint_index[:-1]]
                     joint_target.position = target_joint
                     self.joint_target_pub.publish(joint_target)
 
                 elif self.policy_class == 'ACTTask':
+                    print(self.t, ':')
                     ### post-process actions
-                    target_pos, target_quat, target_hand = self.post_process_task(raw_action)
+                    lhand_action_TF, lhand_target, rhand_action_TF, rhand_target = self.post_process_task(raw_action)
                     ### step the environment
-                    print(self.t, ': ', target_pos, target_quat, target_hand)
-                    rhand_action_TF = TF_mat.from_vectors(target_pos, target_quat)
+                    lhand_action_TF = TF_mat.mul(base_TF, lhand_action_TF)
+                    lhand_pose_target = PoseStamped()
+                    lhand_pose_target.header.frame_id = 'world'
+                    lhand_pose_target.header.stamp = rospy.Time.now()
+                    lhand_pose_target.pose = lhand_action_TF.as_pose_msg()
+                    self.lhand_pose_target_pub.publish(lhand_pose_target)
                     rhand_action_TF = TF_mat.mul(base_TF, rhand_action_TF)
-                    pose_target = PoseStamped()
-                    pose_target.header.frame_id = 'world'
-                    pose_target.header.stamp = rospy.Time.now()
-                    pose_target.pose = rhand_action_TF.as_pose_msg()
-                    self.pose_target_pub.publish(pose_target)
+                    rhand_pose_target = PoseStamped()
+                    rhand_pose_target.header.frame_id = 'world'
+                    rhand_pose_target.header.stamp = rospy.Time.now()
+                    rhand_pose_target.pose = rhand_action_TF.as_pose_msg()
+                    self.rhand_pose_target_pub.publish(rhand_pose_target)
 
-                target_hand = target_hand > 0.5
-                if self.hand_open != target_hand:
-                    self.hand_open = target_hand
+                rhand_target = rhand_target > 0.6
+                if self.hand_open != rhand_target:
+                    self.hand_open = rhand_target
                     hand_open_msg = Int32()
-                    hand_open_msg.data = int(target_hand)
+                    hand_open_msg.data = int(rhand_target)
                     self.hand_open_pub.publish(hand_open_msg)
                 
                 self.t += 1
@@ -344,9 +373,9 @@ def main(args):
 
 '''
 run with following args
-python real_tocabi_act_new.py \
---seed 0 --num_epochs 5000 --temporal_agg --task_name real_tocabi_pick_n_place \
---ckpt_dir /external/act/ckpt/real_tocabi_pick_n_place/ee_global/policy_val_best.ckpt --policy_class ACTTask
+python real_tocabi_act_both.py \
+--seed 0 --num_epochs 5000 --temporal_agg --task_name real_tocabi_open \
+--ckpt_dir /media/dyros/SSD2TB/act/ckpt/real_tocabi_open/ee_rel_new/policy_val_best.ckpt --policy_class ACTTask
 '''
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
