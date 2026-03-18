@@ -34,7 +34,7 @@ def rotate_n_crop_transform(img, size, angle=None, top=None):
 
 
 class EpisodicLeRobotDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, lerobot_dataset: LeRobotDataset, camera_names, n_obs_steps, state_key, action_key, norm_stats, img_aug=False):
+    def __init__(self, episode_ids, lerobot_dataset: LeRobotDataset, camera_names, n_obs_steps, chunk_size, state_key, action_key, norm_stats, img_aug=False, waypoint_indices=None):
         super(EpisodicLeRobotDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset = lerobot_dataset
@@ -42,9 +42,11 @@ class EpisodicLeRobotDataset(torch.utils.data.Dataset):
         self.stats = lerobot_dataset.meta.stats
         self.camera_names = camera_names
         self.n_obs_steps = n_obs_steps
+        self.chunk_size = chunk_size
         self.state_key = state_key
         self.action_key = action_key
         self.norm_stats = norm_stats
+        self.waypoint_indices = waypoint_indices  # dict: episode_id -> list
     
     def __len__(self):
         return len(self.episode_ids)
@@ -84,12 +86,75 @@ class EpisodicLeRobotDataset(torch.utils.data.Dataset):
         qpos_data = data[self.state_key]
         qpos_data = (qpos_data - self.norm_stats["qpos_mean"]) / self.norm_stats["qpos_std"]
         qpos_data = torch.flatten(qpos_data)  # handle n_obs_steps
-        action_data = data[self.action_key]
+
+        if self.waypoint_indices is not None:
+            local_offset = frame_id - self.episodes['dataset_from_index'][episode_id]
+            waypoints = np.array(self.waypoint_indices[episode_id]) - local_offset
+            waypoints = waypoints[waypoints >= 0]
+
+            dof = len(self.norm_stats["qpos_mean"])
+            action_data = torch.zeros([self.chunk_size, dof])
+            start_idx = 0
+            for key_idx in waypoints:
+                action_data[start_idx:key_idx+1] = torch.tensor([0.0, 0.0])
+                # action_data[start_idx:key_idx+1] = self.dataset[key_idx+frame_id][self.state_key][-1]
+                start_idx = key_idx
+                if key_idx > self.chunk_size:
+                    break
+            
+            ep_len = int(self.episodes['dataset_to_index'][episode_id]) - int(self.episodes['dataset_from_index'][episode_id])
+            remaining = ep_len - local_offset
+            is_pad = torch.zeros(self.chunk_size, dtype=torch.bool)
+            if remaining < self.chunk_size:
+                is_pad[remaining:] = True
+        else:
+            action_data = data[self.action_key]
+            is_pad = data['action_is_pad']
+
         action_data = (action_data - self.norm_stats["action_mean"]) / self.norm_stats["action_std"]
 
-        is_pad = data['action_is_pad']
-
         return image_data, qpos_data, action_data, is_pad
+
+def compute_waypoints(lerobot_dataset: LeRobotDataset, num_episodes, state_key, err_threshold=0.05, pos_only=False):
+    """Precompute waypoints per episode using greedy_waypoint_selection.
+
+    Returns:
+        waypoints: dict mapping episode_id -> list (waypoint indices)
+        wp_mean: np.array (action_dof,)
+        wp_std:  np.array (action_dof,)
+    """
+    from waypoint_extraction.extract_waypoints import greedy_waypoint_selection
+
+    episodes_meta = lerobot_dataset.meta.episodes
+    waypoints = {}
+    all_wp_data = []
+
+    for ep_id in range(num_episodes):
+        from_idx = int(episodes_meta['dataset_from_index'][ep_id])
+        to_idx = int(episodes_meta['dataset_to_index'][ep_id])
+
+        # use only the current timestep (index -1)
+        states = np.stack([lerobot_dataset[i][state_key][-1].numpy()
+                           for i in range(from_idx, to_idx)])
+
+        wp_indices = greedy_waypoint_selection(
+            actions=states,
+            gt_states=states,
+            err_threshold=err_threshold,
+            geometry=True,
+            pos_only=pos_only,
+        )
+        waypoints[ep_id] = wp_indices
+
+        ep_waypoints = states[wp_indices]
+        all_wp_data.append(ep_waypoints)
+
+    all_wp_data = np.concatenate(all_wp_data, axis=0)
+    wp_mean = all_wp_data.mean(axis=0).astype(np.float32)
+    wp_std = all_wp_data.std(axis=0).clip(1e-2).astype(np.float32)
+
+    return waypoints, wp_mean, wp_std
+
 
 def load_lerobot_data(config: dict, chunk_size, batch_size_train, batch_size_val):
     dataset_id = config['dataset_id']
@@ -108,10 +173,12 @@ def load_lerobot_data(config: dict, chunk_size, batch_size_train, batch_size_val
 
     # make delta_timestamps
     ds_meta = LeRobotDatasetMetadata(dataset_id)
+    use_computed_waypoints = action_key == 'waypoint' and action_key not in ds_meta.stats
     delta_timestamps = {
         state_key: [dt*i for i in range(1 - n_obs_steps, 1)],
-        action_key: [dt*i for i in range(chunk_size)]
     }
+    if not use_computed_waypoints:
+        delta_timestamps[action_key] = [dt*i for i in range(chunk_size)]
     for cname in camera_names:  # check for camera name availability
         if cname == "":
             assert f'observation.image' in ds_meta.camera_keys, f'image is not included in {dataset_id} dataset'
@@ -121,15 +188,28 @@ def load_lerobot_data(config: dict, chunk_size, batch_size_train, batch_size_val
             delta_timestamps[f'observation.images.{cname}'] = [dt*i for i in range(1 - n_obs_steps, 1)]
     
     # obtain normalization stats for qpos and action
-    norm_stats = {"action_mean": ds_meta.stats[action_key]['mean'].astype(np.float32), 
-                  "action_std": ds_meta.stats[action_key]['std'].astype(np.float32),
-                  "qpos_mean": ds_meta.stats[state_key]['mean'].astype(np.float32), 
+    norm_stats = {"qpos_mean": ds_meta.stats[state_key]['mean'].astype(np.float32),
                   "qpos_std": ds_meta.stats[state_key]['std'].astype(np.float32)}
     
     # construct dataset and dataloader
     lerobot_dataset = LeRobotDataset(dataset_id, delta_timestamps=delta_timestamps)
-    train_dataset = EpisodicLeRobotDataset(train_indices, lerobot_dataset, camera_names, n_obs_steps, state_key, action_key, norm_stats)
-    val_dataset = EpisodicLeRobotDataset(val_indices, lerobot_dataset, camera_names, n_obs_steps, state_key, action_key, norm_stats)
+
+    waypoint_indices = None
+    if use_computed_waypoints:
+        print(f"'waypoint' key not found in dataset — computing waypoints via greedy_waypoint_selection ...")
+        err_threshold = config.get('waypoint_err_threshold', 0.05)
+        pos_only = config.get('waypoint_pos_only', False)
+        waypoint_indices, wp_mean, wp_std = compute_waypoints(
+            lerobot_dataset, num_episodes, state_key, err_threshold=err_threshold, pos_only=pos_only
+        )
+        norm_stats["action_mean"] = wp_mean
+        norm_stats["action_std"] = wp_std
+    else:
+        norm_stats["action_mean"] = ds_meta.stats[action_key]['mean'].astype(np.float32)
+        norm_stats["action_std"] = ds_meta.stats[action_key]['std'].astype(np.float32)
+
+    train_dataset = EpisodicLeRobotDataset(train_indices, lerobot_dataset, camera_names, n_obs_steps, chunk_size, state_key, action_key, norm_stats, waypoint_indices=waypoint_indices)
+    val_dataset = EpisodicLeRobotDataset(val_indices, lerobot_dataset, camera_names, n_obs_steps, chunk_size, state_key, action_key, norm_stats, waypoint_indices=waypoint_indices)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=0)
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=0)
 

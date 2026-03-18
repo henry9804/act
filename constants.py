@@ -1,7 +1,7 @@
 import pathlib
 
 ### Task parameters
-DATA_DIR = '/data/act/data'
+DATA_DIR = '/home/lyh/Data/dataset/'
 # DATA_DIR = '/media/embodied_ai/SSD2TB/act/data'
 SIM_TASK_CONFIGS = {
     'sim_lerobot_pusht':{
@@ -12,7 +12,10 @@ SIM_TASK_CONFIGS = {
         'model_dof': 2,
         'n_obs_steps': 2,
         'fps': 10,
-        'gripper_is_binary': False
+        'gripper_is_binary': False,
+        'action_key': 'waypoint',
+        'waypoint_err_threshold': 1,
+        'waypoint_pos_only': True
     },
 
     'sim_panda_catch_ball':{
